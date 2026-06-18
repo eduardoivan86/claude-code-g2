@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express'
 import OpenAI from 'openai'
 import { toFile } from 'openai/uploads'
+import { transcribeConfigFromEnv } from './transcribeConfig.ts'
 
 // POST /api/transcribe. Accepts `audio/wav` or `audio/pcm` (raw 16 kHz s16le
 // mono — the glasses format). Raw PCM gets a 44-byte RIFF header prepended
@@ -11,11 +12,15 @@ const CHANNELS = 1
 const BITS_PER_SAMPLE = 16
 
 let clientSingleton: OpenAI | null = null
+let modelSingleton: string | null = null
 function client(): OpenAI {
   if (clientSingleton) return clientSingleton
-  const key = process.env.OPENAI_API_KEY
-  if (!key) throw new Error('OPENAI_API_KEY is not set')
-  clientSingleton = new OpenAI({ apiKey: key })
+  const cfg = transcribeConfigFromEnv()
+  // The openai SDK throws on an empty apiKey, even against a custom baseURL
+  // (e.g. a local Whisper server that ignores auth). Pass a dummy non-empty
+  // key in that case so the client still constructs.
+  clientSingleton = new OpenAI({ apiKey: cfg.apiKey || 'none', baseURL: cfg.baseURL })
+  modelSingleton = cfg.model
   return clientSingleton
 }
 
@@ -69,9 +74,10 @@ export async function transcribeHandler(req: Request, res: Response): Promise<vo
 
   try {
     const file = await toFile(wavBuffer, 'audio.wav', { type: 'audio/wav' })
-    const result = await client().audio.transcriptions.create({
+    const openai = client()
+    const result = await openai.audio.transcriptions.create({
       file,
-      model: 'whisper-1',
+      model: modelSingleton ?? 'whisper-1',
       language: 'en',
       response_format: 'json',
     })
