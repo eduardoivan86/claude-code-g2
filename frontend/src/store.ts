@@ -262,9 +262,19 @@ export const store = {
     set({ navIndex: Math.max(0, i), lastActivityAt: Date.now() })
   },
   setSessionScrollOffset(n: number): void {
-    // Clamp to [0, transcript length] so the "▲ N newer" indicator
-    // never grows past the actual number of scrollable lines.
-    const maxOffset = Math.max(0, state.activeTranscript.length)
+    // Clamp to [0, scrollable lines]. Exactly one source is populated at a time:
+    //   - activeTranscript → managed (cc-g2) session
+    //   - nativeTurns      → native ~/.claude mirror
+    // The native mirror's `activeTranscript` is empty, so without the nativeTurns
+    // term the offset was forced to 0 (scroll appeared dead — only the tail showed).
+    // The mirror screen re-clamps to the exact wrapped-line count; this estimate
+    // (~text/36 + thinking + tools + 1 per turn) is a generous upper bound.
+    const nativeLines = state.nativeTurns.reduce(
+      (s, t) =>
+        s + Math.ceil((t.text?.length ?? 0) / 36) + (t.thinking ? 1 : 0) + t.toolUses.length + 1,
+      0,
+    )
+    const maxOffset = Math.max(0, state.activeTranscript.length, nativeLines)
     set({ sessionScrollOffset: Math.max(0, Math.min(n, maxOffset)), lastActivityAt: Date.now() })
   },
 
