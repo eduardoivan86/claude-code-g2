@@ -15,6 +15,8 @@ export interface TranscribeConfig {
   baseURL: string
   apiKey: string
   model: string
+  /** Optional ISO-639-1 hint (e.g. 'es'). Unset → Whisper auto-detects. */
+  language?: string
 }
 
 type Env = Record<string, string | undefined>
@@ -39,6 +41,10 @@ export function transcribeConfigFromEnv(env: Env = process.env): TranscribeConfi
   const provider: TranscribeProvider =
     raw === 'openai' || raw === 'local' ? raw : 'groq'
 
+  // Optional language hint (e.g. 'es'). Empty/unset → Whisper auto-detects.
+  // A hint markedly improves accuracy on short/noisy clips (the glasses mic).
+  const language = (env.TRANSCRIBE_LANGUAGE ?? '').trim() || undefined
+
   switch (provider) {
     case 'openai':
       return {
@@ -46,6 +52,7 @@ export function transcribeConfigFromEnv(env: Env = process.env): TranscribeConfi
         baseURL: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
         apiKey: env.OPENAI_API_KEY || '',
         model: env.OPENAI_STT_MODEL || 'whisper-1',
+        language,
       }
     case 'local':
       return {
@@ -53,6 +60,7 @@ export function transcribeConfigFromEnv(env: Env = process.env): TranscribeConfi
         baseURL: env.WHISPER_BASE_URL || 'http://127.0.0.1:8080/v1',
         apiKey: env.WHISPER_API_KEY || '',
         model: env.WHISPER_MODEL || 'whisper-1',
+        language,
       }
     case 'groq':
     default:
@@ -61,6 +69,7 @@ export function transcribeConfigFromEnv(env: Env = process.env): TranscribeConfi
         baseURL: env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
         apiKey: env.GROQ_API_KEY || '',
         model: env.GROQ_STT_MODEL || 'whisper-large-v3-turbo',
+        language,
       }
   }
 }

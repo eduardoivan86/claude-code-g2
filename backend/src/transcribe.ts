@@ -13,6 +13,7 @@ const BITS_PER_SAMPLE = 16
 
 let clientSingleton: OpenAI | null = null
 let modelSingleton: string | null = null
+let languageSingleton: string | undefined
 function client(): OpenAI {
   if (clientSingleton) return clientSingleton
   const cfg = transcribeConfigFromEnv()
@@ -21,6 +22,7 @@ function client(): OpenAI {
   // key in that case so the client still constructs.
   clientSingleton = new OpenAI({ apiKey: cfg.apiKey || 'none', baseURL: cfg.baseURL })
   modelSingleton = cfg.model
+  languageSingleton = cfg.language
   return clientSingleton
 }
 
@@ -78,7 +80,9 @@ export async function transcribeHandler(req: Request, res: Response): Promise<vo
     const result = await openai.audio.transcriptions.create({
       file,
       model: modelSingleton ?? 'whisper-1',
-      language: 'en',
+      // Language from TRANSCRIBE_LANGUAGE (e.g. 'es'). Unset → auto-detect.
+      // A hint improves accuracy on short/noisy glasses-mic clips.
+      ...(languageSingleton ? { language: languageSingleton } : {}),
       response_format: 'json',
     })
     res.json({ text: result.text.trim() })
