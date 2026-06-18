@@ -24,3 +24,6 @@ frontend/glasses_*.png
 /HELLO*
 !/README.md
 .gstack/
+
+# Even Hub package build artifact
+*.ehpk
