@@ -45,6 +45,7 @@ export function buildSidebarItems(snapshot: AppSnapshot): SidebarItem[] {
     busy: s.busy,
   }))
   items.push({ kind: 'new', label: '+ new' })
+  items.push({ kind: 'native', label: '⌂ native' })
   return items
 }
 
@@ -211,6 +212,13 @@ function buildLeftPane(items: SidebarItem[], highlightedIndex: number): string {
     rows.push(' + new')
   }
 
+  const nativeIdx = sessionItems.length + 1
+  if (nativeIdx === highlightedIndex) {
+    rows.push('[⌂ native]')
+  } else {
+    rows.push(' ⌂ native')
+  }
+
   return rows.join('\n')
 }
 
@@ -223,6 +231,7 @@ function actionHint(snapshot: AppSnapshot, items: SidebarItem[], highlightedInde
   if (!item) return ''
 
   if (item.kind === 'new') return 'tap: new session (voice)'
+  if (item.kind === 'native') return 'tap: browse ~/.claude sessions'
   if (item.isActive) {
     return snapshot.activeBusy ? '2tap: close' : 'tap: talk · 2tap: close'
   }
@@ -237,7 +246,7 @@ function buildRightPane(snapshot: AppSnapshot, items: SidebarItem[], highlighted
       'tap: open session',
       '2tap: delete session',
       '[+]: new voice session',
-      '',
+      '[⌂]: browse ~/.claude',
       'tap [+] to start',
     ].join('\n')
   }

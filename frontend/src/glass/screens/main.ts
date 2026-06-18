@@ -148,6 +148,10 @@ function renderSidebar(snapshot: AppSnapshot, nav: { highlightedIndex: number })
       lines.push(line(i === highlighted ? '[+ new session]' : ' + new session'))
       continue
     }
+    if (item.kind === 'native') {
+      lines.push(line(i === highlighted ? '[⌂ native sessions]' : ' ⌂ native sessions'))
+      continue
+    }
     const dot = item.isActive ? '●' : (item.busy ? '◐' : '○')
     const label = truncate(item.label, 38)
     if (i === highlighted) {
@@ -315,6 +319,8 @@ export const mainScreen: GlassScreen<AppSnapshot, AppActions> = {
         if (!item) return nav
         if (item.kind === 'new') {
           ctx.startNewRecording()
+        } else if (item.kind === 'native') {
+          ctx.openNativeProjects()
         } else if (item.id) {
           ctx.openSessionById(item.id)
         }

@@ -1,5 +1,7 @@
 import type {
   BackendConfig,
+  NativeProjectSummary,
+  NativeSessionSummary,
   Session,
   SessionSummary,
   SseEvent,
@@ -10,6 +12,14 @@ export class NotConfiguredError extends Error {
   constructor() {
     super('Backend URL and token are not configured yet')
     this.name = 'NotConfiguredError'
+  }
+}
+
+// Thrown when POST /api/native/sessions/:sid/message returns 409 (mid-generation).
+export class SessionBusyError extends Error {
+  constructor() {
+    super('Session is busy (mid-generation)')
+    this.name = 'SessionBusyError'
   }
 }
 
@@ -154,6 +164,59 @@ export async function transcribeAudio(pcm: Uint8Array): Promise<string> {
   if (!res.ok) throw new Error(`transcribe: ${res.status}`)
   const body = await res.json() as { text: string }
   return body.text
+}
+
+// ── Native sessions bridge ───────────────────────────────────────────────
+// Reads the user's own ~/.claude/projects/*.jsonl transcripts via the backend
+// /api/native/* routes. Reuses authFetch (header bearer) for plain HTTP; the
+// mirror stream uses EventSource with ?token= (see nativeMirrorUrl below).
+
+export async function listNativeProjects(): Promise<NativeProjectSummary[]> {
+  const res = await authFetch('/api/native/projects')
+  if (!res.ok) throw new Error(`listNativeProjects: ${res.status}`)
+  return res.json() as Promise<NativeProjectSummary[]>
+}
+
+export async function listNativeSessions(dir: string): Promise<NativeSessionSummary[]> {
+  const res = await authFetch(`/api/native/projects/${encodeURIComponent(dir)}/sessions`)
+  if (!res.ok) throw new Error(`listNativeSessions: ${res.status}`)
+  return res.json() as Promise<NativeSessionSummary[]>
+}
+
+// Start a brand-new native session in `cwd`. Returns the server-chosen sid.
+// The .jsonl appears a moment later, so the mirror stream may 404 briefly —
+// callers should retry opening the mirror.
+export async function newNativeSession(cwd: string, prompt: string): Promise<string> {
+  const res = await authFetch('/api/native/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ cwd, prompt }),
+  })
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`newNativeSession: ${res.status} ${err}`)
+  }
+  const body = await res.json() as { sessionId: string }
+  return body.sessionId
+}
+
+// Append a turn to an existing native session (resume). 202 on accept;
+// throws SessionBusyError on 409. Reply turns arrive via the mirror SSE.
+export async function sendNativeMessage(sid: string, prompt: string): Promise<void> {
+  const res = await authFetch(`/api/native/sessions/${encodeURIComponent(sid)}/message`, {
+    method: 'POST',
+    body: JSON.stringify({ prompt }),
+  })
+  if (res.status === 409) throw new SessionBusyError()
+  if (!res.ok) throw new Error(`sendNativeMessage: ${res.status}`)
+}
+
+// Build the mirror SSE URL with the bearer token as a query param
+// (EventSource can't set headers). Returns null if not configured.
+export function nativeMirrorUrl(sid: string): string | null {
+  const { backendUrl, token } = store.getState()
+  if (!backendUrl || !token) return null
+  const qs = new URLSearchParams({ token })
+  return `${backendUrl}/api/native/sessions/${encodeURIComponent(sid)}/stream?${qs.toString()}`
 }
 
 // Server-Sent Events — single reconnecting connection per channel.

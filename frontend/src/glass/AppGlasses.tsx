@@ -12,11 +12,17 @@ import {
   createSession,
   deleteSession as apiDeleteSession,
   getSession,
+  listNativeProjects,
+  listNativeSessions,
+  nativeMirrorUrl,
+  newNativeSession,
+  sendNativeMessage,
   sendTurn,
+  SessionBusyError,
   SseClient,
   transcribeAudio,
 } from '../api'
-import type { AppMode, SseEvent } from '../types'
+import type { AppMode, NativeTurn, SseEvent } from '../types'
 import { startCapture, stopCapture } from '../audio'
 
 function fallbackModeAfterRecording(): AppMode {
@@ -32,6 +38,9 @@ const MODE_PATHS: Record<AppMode, string> = {
   'recording-turn': '/g/recording-turn',
   'confirming-transcript': '/g/confirming',
   answering: '/g/answering',
+  'native-projects': '/g/native-projects',
+  'native-sessions': '/g/native-sessions',
+  'native-mirror': '/g/native-mirror',
 }
 
 const PATH_TO_SCREEN: Record<string, string> = {
@@ -42,6 +51,9 @@ const PATH_TO_SCREEN: Record<string, string> = {
   '/g/recording-turn': 'recording-turn',
   '/g/confirming': 'confirming-transcript',
   '/g/answering': 'answering',
+  '/g/native-projects': 'native-projects',
+  '/g/native-sessions': 'native-sessions',
+  '/g/native-mirror': 'native-mirror',
 }
 
 function pathToScreen(pathname: string): string {
@@ -136,6 +148,70 @@ export function AppGlasses() {
     void bootstrap()
   }, [state.backendUrl, state.token])
 
+  // Native mirror SSE — one EventSource per mirrored session id. The .jsonl for
+  // a freshly-created native session appears a moment after POST /sessions, so
+  // the stream may 404 briefly; we retry the connection a few times before
+  // giving up. The browser also auto-reconnects via the server `retry:` hint.
+  useEffect(() => {
+    const sid = state.nativeMirrorSid
+    if (!sid || !state.backendUrl || !state.token) return
+    const url = nativeMirrorUrl(sid)
+    if (!url) return
+
+    let es: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    let gotData = false
+    let cancelled = false
+    const MAX_ATTEMPTS = 12 // ~ retries while the .jsonl is being created
+
+    const open = () => {
+      if (cancelled) return
+      attempts++
+      const next = new EventSource(url)
+      es = next
+      next.onmessage = (msg) => {
+        gotData = true
+        try {
+          const turn = JSON.parse(msg.data) as NativeTurn
+          store.pushNativeTurn(turn)
+        } catch (err) {
+          console.warn('[native:mirror] parse error', err)
+        }
+      }
+      next.onerror = () => {
+        if (cancelled) return
+        // If we've never received any data, the session file likely isn't on
+        // disk yet (404 → connection closed). Retry on a short delay.
+        if (!gotData && attempts < MAX_ATTEMPTS) {
+          next.close()
+          if (es === next) es = null
+          retryTimer = setTimeout(open, 800)
+        }
+        // Otherwise leave the EventSource to auto-reconnect via `retry:`.
+      }
+    }
+    open()
+
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+      es?.close()
+    }
+  }, [state.nativeMirrorSid, state.backendUrl, state.token])
+
+  // Re-render ticker for native list/mirror screens (relative times + transient
+  // status spinners). Mirrors the recording/transcribing ticker above.
+  useEffect(() => {
+    const isNative =
+      state.mode === 'native-projects' ||
+      state.mode === 'native-sessions' ||
+      state.mode === 'native-mirror'
+    if (!isNative) return
+    const iv = setInterval(() => setTick((t) => (t + 1) & 0xff), 500)
+    return () => clearInterval(iv)
+  }, [state.mode])
+
   const snapshot: AppSnapshot = {
     mode: state.mode,
     sessions: state.sessions,
@@ -156,6 +232,13 @@ export function AppGlasses() {
     pendingQuestion: state.pendingQuestion,
     scrollingTranscript: state.scrollingTranscript,
     sidebarVisible: state.sidebarVisible,
+    nativeProjects: state.nativeProjects,
+    nativeSessions: state.nativeSessions,
+    nativeSelectedProject: state.nativeSelectedProject,
+    nativeMirrorSid: state.nativeMirrorSid,
+    nativeTurns: state.nativeTurns,
+    nativeMirrorStatus: state.nativeMirrorStatus,
+    nativeLoading: state.nativeLoading,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -234,6 +317,15 @@ export function AppGlasses() {
     }
   }
 
+  // When a recording is for the native bridge (new session or follow-up), this
+  // ref records the target so the shared stop/cancel handlers route correctly
+  // instead of hitting the managed-session API.
+  const nativePendingFlow = useRef<
+    | { kind: 'new'; cwd: string }
+    | { kind: 'turn'; sid: string }
+    | null
+  >(null)
+
   const actions = useRef<AppActions>({
     startNewRecording() {
       void beginRecording('recording-new')
@@ -245,6 +337,14 @@ export function AppGlasses() {
       void stopCapture().catch(() => {})
       store.setPendingTranscript(null)
       store.setConfirmTranscriptFlow(null)
+      // If this recording was for the native bridge, return to the right
+      // native screen rather than the main glasses UI.
+      const flow = nativePendingFlow.current
+      nativePendingFlow.current = null
+      if (flow) {
+        store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+        return
+      }
       store.enterMode(fallbackModeAfterRecording())
     },
     async stopNewRecordingAndTranscribe() {
@@ -262,6 +362,11 @@ export function AppGlasses() {
       }
     },
     async stopTurnRecordingAndSend() {
+      // Native bridge recordings are routed here too (they reuse recording-turn).
+      if (nativePendingFlow.current) {
+        await finishNativeRecording()
+        return
+      }
       const sid = store.getState().activeSessionId
       if (!sid) { store.enterMode('main'); return }
       try {
@@ -358,7 +463,141 @@ export function AppGlasses() {
         store.setError('Answer failed')
       }
     },
+
+    // ── Native sessions bridge ────────────────────────────────────────────
+    openNativeProjects() {
+      store.enterMode('native-projects')
+      store.setNativeLoading(true)
+      void listNativeProjects()
+        .then((projects) => store.setNativeProjects(projects))
+        .catch((err) => {
+          console.error('[glass] listNativeProjects failed:', err)
+          store.setNativeLoading(false)
+          store.setError('Load projects failed')
+        })
+    },
+    pickNativeProject(dirPath: string, project: string) {
+      store.enterMode('native-sessions')
+      store.setNativeLoading(true)
+      void listNativeSessions(dirPath)
+        .then((sessions) => store.setNativeSessions(dirPath, project, sessions))
+        .catch((err) => {
+          console.error('[glass] listNativeSessions failed:', err)
+          store.setNativeLoading(false)
+          store.setError('Load sessions failed')
+        })
+    },
+    openNativeSession(sid: string, cwd: string) {
+      store.openNativeMirror(sid, cwd)
+      store.enterMode('native-mirror')
+    },
+    startNativeNewSession() {
+      void beginNativeNewSession()
+    },
+    scrollNativeMirror(delta: number) {
+      const cur = store.getState().sessionScrollOffset
+      store.setSessionScrollOffset(cur + delta)
+    },
+    recordNativeFollowUp() {
+      void beginNativeFollowUp()
+    },
+    exitNative() {
+      store.clearNativeMirror()
+      store.enterMode('main')
+    },
+    nativeBack() {
+      const mode = store.getState().mode
+      if (mode === 'native-mirror') {
+        store.clearNativeMirror()
+        store.enterMode('native-sessions')
+      } else if (mode === 'native-sessions') {
+        store.enterMode('native-projects')
+      } else {
+        store.enterMode('main')
+      }
+    },
   })
+
+  // Native voice flows reuse the existing recording UI (recording-turn mode +
+  // recordingScreen). nativePendingFlow marks the recording as native so the
+  // shared stop handler (stopTurnRecordingAndSend) routes to the native API.
+
+  // [+ new session]: voice → transcribe → POST /api/native/sessions {cwd, prompt}
+  // → open the mirror on the returned sid. cwd is the representative project
+  // cwd from the sessions list we're currently viewing.
+  async function beginNativeNewSession() {
+    const sessions = store.getState().nativeSessions
+    const cwd = sessions[0]?.cwd
+    if (!cwd) {
+      store.setError('No cwd for project')
+      return
+    }
+    nativePendingFlow.current = { kind: 'new', cwd }
+    await beginRecording('recording-turn')
+  }
+
+  // Mirror tap: voice → transcribe → POST /api/native/sessions/:sid/message.
+  async function beginNativeFollowUp() {
+    const sid = store.getState().nativeMirrorSid
+    if (!sid) return
+    nativePendingFlow.current = { kind: 'turn', sid }
+    await beginRecording('recording-turn')
+  }
+
+  // Stop the native recording, transcribe, then dispatch to the native API.
+  // Called from the shared recording stop handler when nativePendingFlow is set.
+  async function finishNativeRecording() {
+    const flow = nativePendingFlow.current
+    nativePendingFlow.current = null
+    if (!flow) return false
+    try {
+      const text = await finishRecordingToText()
+      if (text == null) {
+        // finishRecordingToText already set an error toast.
+        store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+        return true
+      }
+      if (flow.kind === 'new') {
+        store.setNativeMirrorStatus('sending')
+        store.enterMode('native-mirror')
+        const sid = await newNativeSession(flow.cwd, text)
+        store.openNativeMirror(sid, flow.cwd)
+        // The mirror effect opens the stream (with retry while the .jsonl
+        // is created). Show "connecting" until the first turn arrives.
+        store.setNativeMirrorStatus('connecting')
+        // Clear the connecting hint shortly; turns will replace it.
+        setTimeout(() => {
+          if (store.getState().nativeMirrorSid === sid) {
+            store.setNativeMirrorStatus(null)
+          }
+        }, 4000)
+      } else {
+        store.setNativeMirrorStatus('sending')
+        store.enterMode('native-mirror')
+        try {
+          await sendNativeMessage(flow.sid, text)
+          store.setNativeMirrorStatus(null)
+        } catch (err) {
+          if (err instanceof SessionBusyError) {
+            store.setNativeMirrorStatus('busy')
+            setTimeout(() => {
+              if (store.getState().nativeMirrorStatus === 'busy') {
+                store.setNativeMirrorStatus(null)
+              }
+            }, 2500)
+          } else {
+            throw err
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[glass] native recording flow failed:', err)
+      store.setError('Native send failed')
+      store.setNativeMirrorStatus(null)
+      store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+    }
+    return true
+  }
 
   const handleGlassAction = useCallback(
     (

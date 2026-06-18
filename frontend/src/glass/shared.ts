@@ -1,4 +1,13 @@
-import type { AppMode, ConnectionStatus, SessionSummary, TranscriptEvent } from '../types'
+import type {
+  AppMode,
+  ConnectionStatus,
+  NativeProjectSummary,
+  NativeSessionSummary,
+  NativeTurn,
+  SessionSummary,
+  TranscriptEvent,
+} from '../types'
+import type { NativeMirrorStatus } from '../store'
 
 export interface ConfirmAction {
   kind: 'delete'
@@ -14,7 +23,7 @@ export interface PendingQuestion {
 }
 
 export interface SidebarItem {
-  kind: 'session' | 'new'
+  kind: 'session' | 'new' | 'native'
   id?: string
   label: string
   isActive?: boolean
@@ -47,6 +56,15 @@ export interface AppSnapshot {
 
   // Sidebar overlay: true = show session list, false = full-screen transcript
   sidebarVisible: boolean
+
+  // ── Native sessions bridge ──────────────────────────────────────────────
+  nativeProjects: NativeProjectSummary[]
+  nativeSessions: NativeSessionSummary[]
+  nativeSelectedProject: string | null
+  nativeMirrorSid: string | null
+  nativeTurns: NativeTurn[]
+  nativeMirrorStatus: NativeMirrorStatus
+  nativeLoading: boolean
 }
 
 export interface AppActions {
@@ -71,4 +89,14 @@ export interface AppActions {
   cancelTranscript(): void
 
   answerQuestion(answer: string): void
+
+  // ── Native sessions bridge ──────────────────────────────────────────────
+  openNativeProjects(): void                         // enter the native projects browser
+  pickNativeProject(dirPath: string, project: string): void // → sessions list
+  openNativeSession(sid: string, cwd: string): void  // → mirror an existing session
+  startNativeNewSession(): void                       // [+] voice → new native session
+  scrollNativeMirror(delta: number): void
+  recordNativeFollowUp(): void                        // tap in mirror → voice follow-up
+  exitNative(): void                                  // back out to the main glasses UI
+  nativeBack(): void                                  // mirror → sessions → projects → main
 }

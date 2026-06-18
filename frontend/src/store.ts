@@ -3,10 +3,21 @@ import type {
   AppMode,
   BackendConfig,
   ConnectionStatus,
+  NativeProjectSummary,
+  NativeSessionSummary,
+  NativeTurn,
   SessionSummary,
   TranscriptEvent,
 } from './types'
 import type { ConfirmAction, PendingQuestion } from './glass/shared'
+
+// Transient HUD status shown while a native voice follow-up is in flight.
+export type NativeMirrorStatus =
+  | null
+  | 'transcribing' // capturing → whisper
+  | 'sending'      // POST message in flight
+  | 'busy'         // 409 session_busy
+  | 'connecting'   // opening the mirror stream (esp. new sessions)
 
 export interface AppState {
   backendUrl: string | null
@@ -43,6 +54,17 @@ export interface AppState {
 
   scrollingTranscript: boolean
   sidebarVisible: boolean
+
+  // ── Native sessions bridge ──────────────────────────────────────────────
+  nativeProjects: NativeProjectSummary[]
+  nativeSessions: NativeSessionSummary[]
+  nativeSelectedDir: string | null     // dirPath basename feeding the sessions list
+  nativeSelectedProject: string | null // human project name for the header
+  nativeMirrorSid: string | null
+  nativeMirrorCwd: string | null        // cwd of the mirrored session (for follow-ups → new isn't used here)
+  nativeTurns: NativeTurn[]
+  nativeMirrorStatus: NativeMirrorStatus
+  nativeLoading: boolean
 }
 
 const initialState: AppState = {
@@ -77,6 +99,16 @@ const initialState: AppState = {
   pendingQuestion: null,
   scrollingTranscript: false,
   sidebarVisible: false,
+
+  nativeProjects: [],
+  nativeSessions: [],
+  nativeSelectedDir: null,
+  nativeSelectedProject: null,
+  nativeMirrorSid: null,
+  nativeMirrorCwd: null,
+  nativeTurns: [],
+  nativeMirrorStatus: null,
+  nativeLoading: false,
 }
 
 let state: AppState = initialState
@@ -267,6 +299,60 @@ export const store = {
 
   getCachedTranscript(sessionId: string): TranscriptEvent[] | null {
     return state.transcriptCache[sessionId] ?? null
+  },
+
+  // ── Native sessions bridge ────────────────────────────────────────────────
+  setNativeLoading(v: boolean): void {
+    set({ nativeLoading: v })
+  },
+  setNativeProjects(projects: NativeProjectSummary[]): void {
+    set({ nativeProjects: projects, nativeLoading: false })
+  },
+  setNativeSessions(dir: string, project: string, sessions: NativeSessionSummary[]): void {
+    set({
+      nativeSelectedDir: dir,
+      nativeSelectedProject: project,
+      nativeSessions: sessions,
+      nativeLoading: false,
+    })
+  },
+  // Open a mirror: reset turns + cursor, mark which session/cwd we're watching.
+  openNativeMirror(sid: string, cwd: string | null): void {
+    set({
+      nativeMirrorSid: sid,
+      nativeMirrorCwd: cwd,
+      nativeTurns: [],
+      nativeMirrorStatus: null,
+      sessionScrollOffset: 0,
+      lastActivityAt: Date.now(),
+    })
+  },
+  // Append/replace a turn from the mirror SSE. tailSession replays existing
+  // turns then streams new ones; turns are keyed by uuid so replays of the
+  // same turn (e.g. assistant text growing) overwrite rather than duplicate.
+  pushNativeTurn(turn: NativeTurn): void {
+    const turns = state.nativeTurns
+    const idx = turns.findIndex((t) => t.uuid === turn.uuid)
+    let next: NativeTurn[]
+    if (idx >= 0) {
+      next = [...turns]
+      next[idx] = turn
+    } else {
+      next = [...turns, turn]
+    }
+    const update: Partial<AppState> = { nativeTurns: next, lastActivityAt: Date.now() }
+    set(update)
+  },
+  setNativeMirrorStatus(status: NativeMirrorStatus): void {
+    set({ nativeMirrorStatus: status })
+  },
+  clearNativeMirror(): void {
+    set({
+      nativeMirrorSid: null,
+      nativeMirrorCwd: null,
+      nativeTurns: [],
+      nativeMirrorStatus: null,
+    })
   },
 }
 

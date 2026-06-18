@@ -41,6 +41,9 @@ function glassesState(mode: string, activeBusy: boolean): { label: string; color
     case 'picking-project': return { label: 'Picking project…', color: 'text-text' }
     case 'confirming-transcript': return { label: 'Confirming voice…', color: 'text-text' }
     case 'answering': return { label: 'Claude asked a question', color: 'text-warning' }
+    case 'native-projects': return { label: '⌂ Browsing native projects', color: 'text-text' }
+    case 'native-sessions': return { label: '⌂ Browsing native sessions', color: 'text-text' }
+    case 'native-mirror': return { label: '⌂ Mirroring native session', color: 'text-text' }
     default:
       if (activeBusy) return { label: '◐ Claude is working…', color: 'text-warning' }
       return null
