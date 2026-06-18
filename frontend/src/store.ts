@@ -341,17 +341,23 @@ export const store = {
   // turns then streams new ones; turns are keyed by uuid so replays of the
   // same turn (e.g. assistant text growing) overwrite rather than duplicate.
   pushNativeTurn(turn: NativeTurn): void {
-    const turns = state.nativeTurns
-    const idx = turns.findIndex((t) => t.uuid === turn.uuid)
+    // When a REAL turn arrives over SSE, drop any optimistic echo we rendered
+    // for it (same role + text) so the user's follow-up isn't shown twice.
+    const base = turn.uuid.startsWith('optimistic-')
+      ? state.nativeTurns
+      : state.nativeTurns.filter(
+          (t) =>
+            !(t.uuid.startsWith('optimistic-') && t.role === turn.role && t.text.trim() === turn.text.trim()),
+        )
+    const idx = base.findIndex((t) => t.uuid === turn.uuid)
     let next: NativeTurn[]
     if (idx >= 0) {
-      next = [...turns]
+      next = [...base]
       next[idx] = turn
     } else {
-      next = [...turns, turn]
+      next = [...base, turn]
     }
-    const update: Partial<AppState> = { nativeTurns: next, lastActivityAt: Date.now() }
-    set(update)
+    set({ nativeTurns: next, lastActivityAt: Date.now() })
   },
   setNativeMirrorStatus(status: NativeMirrorStatus): void {
     set({ nativeMirrorStatus: status })

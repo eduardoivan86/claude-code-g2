@@ -562,6 +562,17 @@ export function AppGlasses() {
         store.enterMode('native-mirror')
         const sid = await newNativeSession(flow.cwd, text)
         store.openNativeMirror(sid, flow.cwd)
+        // Optimistic echo: show the user's prompt on the HUD immediately
+        // (deduped when the real turn arrives over SSE).
+        store.pushNativeTurn({
+          uuid: `optimistic-${Date.now()}`,
+          sessionId: sid,
+          role: 'user',
+          text,
+          toolUses: [],
+          isToolResult: false,
+          timestamp: new Date().toISOString(),
+        })
         // The mirror effect opens the stream (with retry while the .jsonl
         // is created). Show "connecting" until the first turn arrives.
         store.setNativeMirrorStatus('connecting')
@@ -574,6 +585,17 @@ export function AppGlasses() {
       } else {
         store.setNativeMirrorStatus('sending')
         store.enterMode('native-mirror')
+        // Optimistic echo: render the prompt on the HUD now; the real user
+        // turn from SSE replaces it (deduped by role + text in pushNativeTurn).
+        store.pushNativeTurn({
+          uuid: `optimistic-${Date.now()}`,
+          sessionId: flow.sid,
+          role: 'user',
+          text,
+          toolUses: [],
+          isToolResult: false,
+          timestamp: new Date().toISOString(),
+        })
         try {
           await sendNativeMessage(flow.sid, text)
           store.setNativeMirrorStatus(null)
