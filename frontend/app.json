@@ -1,9 +1,9 @@
 {
-  "id": "com.samsiavoshian.ccg2",
-  "name": "Claude Code G2",
+  "id": "com.eduardoivan.ccg2native",
+  "name": "Claude Code G2 — Native",
   "version": "0.1.0",
-  "description": "Run Claude Code from your G2 glasses.",
-  "author": "Sam Siavoshian",
+  "description": "Mirror, continue (by voice), and start your real Claude Code sessions on G2 glasses.",
+  "author": "Eduardo Ivan",
   "entry": "index.html",
   "permissions": [
     "audio",
