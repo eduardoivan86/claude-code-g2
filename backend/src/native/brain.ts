@@ -78,6 +78,86 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) : s;
 }
 
+// -----------------------------------------------------------------------------
+// Tool-call artifact hardening.
+//
+// The Groq llama-3.3-70b model sometimes leaks a native-format tool call into
+// the TEXT content instead of (or in addition to) returning a proper OpenAI
+// `tool_calls` entry, e.g. the reply ends with:
+//   ...restringida. <function=relay_to_claude{"message":"…"}>
+// or a fully closed block:
+//   <function=relay_to_claude>{"message":"…"}</function>
+// The user-facing `reply` must NEVER contain a `<function` artifact, and a relay
+// intent expressed this way must not be silently dropped.
+// -----------------------------------------------------------------------------
+
+// Pure function: strip any leaked `<function=…>` tool-call artifact from the
+// user-facing reply text. Removes fully-closed `<function=…>…</function>` blocks,
+// then truncates from the first remaining `<function=` onward (covers the common
+// unclosed/streaming-cutoff case), and trims. Exported for unit testing.
+export function cleanReplyText(text: string): string {
+  if (!text) return "";
+  // 1) Drop any complete <function=…>…</function> blocks anywhere in the text.
+  let out = text.replace(/<function=[\s\S]*?<\/function>/gi, "");
+  // 2) Truncate from the first surviving `<function=` (unclosed leak) onward.
+  const idx = out.indexOf("<function=");
+  if (idx >= 0) out = out.slice(0, idx);
+  return out.trim();
+}
+
+// Best-effort: extract the relay `message` from a leaked native-format tool call
+// embedded in the raw text. Handles both:
+//   <function=relay_to_claude{"message":"…"}>
+//   <function=relay_to_claude>{"message":"…"}</function>
+// Tries to JSON-parse the first `{…}` after the tag for a `message` field; if
+// that fails, falls back to the plain text after the tag up to `>`/`</function>`.
+// Returns null when no `relay_to_claude` artifact is present.
+export function extractLeakedRelayMessage(text: string): string | null {
+  if (!text) return null;
+  const tag = "<function=relay_to_claude";
+  const tagIdx = text.indexOf(tag);
+  if (tagIdx < 0) return null;
+  const after = text.slice(tagIdx + tag.length);
+
+  // Try to find a balanced {…} object after the tag and JSON-parse it.
+  const braceStart = after.indexOf("{");
+  if (braceStart >= 0) {
+    let depth = 0;
+    let end = -1;
+    for (let i = braceStart; i < after.length; i++) {
+      const ch = after[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    if (end >= 0) {
+      const objText = after.slice(braceStart, end + 1);
+      try {
+        const parsed = JSON.parse(objText) as { message?: unknown };
+        if (typeof parsed.message === "string" && parsed.message.trim()) {
+          return parsed.message.trim();
+        }
+      } catch {
+        // Fall through to the plain-text fallback below.
+      }
+    }
+  }
+
+  // Fallback: take the text after the tag up to the first `>` or `</function>`.
+  let rest = after;
+  const closeFn = rest.indexOf("</function>");
+  if (closeFn >= 0) rest = rest.slice(0, closeFn);
+  const gt = rest.indexOf(">");
+  if (gt >= 0) rest = rest.slice(0, gt);
+  const cleaned = rest.replace(/^[>\s{]+/, "").trim();
+  return cleaned || null;
+}
+
 // Relay a message to the session using the SAME logic as the message route:
 // deliver immediately if idle, otherwise enqueue for the backend drain loop.
 function relayToSession(
@@ -133,11 +213,14 @@ export async function runBrain(opts: RunBrainOpts): Promise<RunBrainResult> {
 
   const choice = completion.choices[0];
   const msg = choice?.message;
-  const content = (msg?.content ?? "").trim();
+  const rawContent = msg?.content ?? "";
+  // The user-facing reply must NEVER contain a `<function` artifact.
+  const content = cleanReplyText(rawContent);
   const toolCall = msg?.tool_calls?.find(
     (c) => c.type === "function" && c.function?.name === "relay_to_claude",
   );
 
+  // PRIMARY path: a proper OpenAI tool_calls entry.
   if (toolCall && toolCall.type === "function") {
     let relayMessage = "";
     try {
@@ -158,6 +241,20 @@ export async function runBrain(opts: RunBrainOpts): Promise<RunBrainResult> {
       reply: content || "Listo, se lo pasé a Claude.",
       relayed: true,
       relayedMessage: relayMessage,
+    };
+  }
+
+  // FALLBACK path: no proper tool_call, but the model leaked a native-format
+  // `<function=relay_to_claude …>` into the text. Best-effort extract the
+  // message and relay it via the SAME idle→deliver / busy→queue path so the
+  // user's relay intent isn't lost just because the model mis-formatted it.
+  const leaked = extractLeakedRelayMessage(rawContent);
+  if (leaked) {
+    relayToSession(opts.sessionId, opts.cwd, leaked, opts.getConfig());
+    return {
+      reply: content || "Listo, se lo pasé a Claude.",
+      relayed: true,
+      relayedMessage: leaked,
     };
   }
 

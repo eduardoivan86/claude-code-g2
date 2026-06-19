@@ -9,6 +9,7 @@ import type { AppSnapshot, AppActions } from './shared'
 import { isRecordingMode, store, useAppState } from '../store'
 import {
   bootstrap,
+  brainMessage,
   createSession,
   deleteSession as apiDeleteSession,
   getHandoff,
@@ -17,7 +18,6 @@ import {
   listNativeSessions,
   nativeMirrorUrl,
   newNativeSession,
-  sendNativeMessage,
   setHandoff,
   sendTurn,
   SseClient,
@@ -25,6 +25,7 @@ import {
 } from '../api'
 import type { AppMode, NativeTurn, SseEvent } from '../types'
 import { startCapture, stopCapture } from '../audio'
+import { speak } from '../voice'
 
 // TODO(background-state): persist the native mirror so the "Claude needs you"
 // banner keeps working when the phone app is backgrounded. The Even Hub runs
@@ -272,6 +273,30 @@ export function AppGlasses() {
     }
   }, [state.nativeMirrorSid, state.backendUrl, state.token])
 
+  // Speak the attention banner when Claude finishes and is now waiting on the
+  // user — but only if voice is enabled. The HUD banner stays as-is regardless.
+  // Fires on the false→true transition of nativeAttention.
+  // NOTE: this speak has NO user gesture, so on iOS WKWebView it may be blocked
+  // until the user has interacted with the page. That's acceptable — the HUD
+  // banner is the guaranteed channel (see voice.ts).
+  const prevAttentionRef = useRef(false)
+  useEffect(() => {
+    const was = prevAttentionRef.current
+    prevAttentionRef.current = state.nativeAttention
+    if (state.nativeAttention && !was && state.voiceEnabled) {
+      speak('Claude terminó, te espera.')
+    }
+  }, [state.nativeAttention, state.voiceEnabled])
+
+  // Clear a stale brain reply on a timer so the 🧠 pin doesn't linger forever
+  // if the user never records again. `recordNativeFollowUp` clears it eagerly on
+  // the next turn; this is the fallback for inaction.
+  useEffect(() => {
+    if (!state.nativeBrainReply || state.nativeBrainReply === '…') return
+    const t = setTimeout(() => store.setNativeBrainReply(null), 10_000)
+    return () => clearTimeout(t)
+  }, [state.nativeBrainReply])
+
   // Re-render ticker for native list/mirror screens (relative times + transient
   // status spinners). Mirrors the recording/transcribing ticker above.
   useEffect(() => {
@@ -319,6 +344,8 @@ export function AppGlasses() {
     nativeLoading: state.nativeLoading,
     nativeAttention: state.nativeAttention,
     nativePending: state.nativePending,
+    voiceEnabled: state.voiceEnabled,
+    nativeBrainReply: state.nativeBrainReply,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -625,6 +652,14 @@ export function AppGlasses() {
     clearNativePending() {
       store.clearNativePending()
     },
+
+    // ── Brain voice / reply ───────────────────────────────────────────────
+    setVoiceEnabled(v: boolean) {
+      store.setVoiceEnabled(v)
+    },
+    setNativeBrainReply(v: string | null) {
+      store.setNativeBrainReply(v)
+    },
   })
 
   // Native voice flows reuse the existing recording UI (recording-turn mode +
@@ -645,10 +680,12 @@ export function AppGlasses() {
     await beginRecording('recording-turn')
   }
 
-  // Mirror tap: voice → transcribe → POST /api/native/sessions/:sid/message.
+  // Mirror tap: voice → transcribe → brain. Clear any previous brain reply so a
+  // stale 🧠 pin doesn't linger while the user speaks the next turn.
   async function beginNativeFollowUp() {
     const sid = store.getState().nativeMirrorSid
     if (!sid) return
+    store.setNativeBrainReply(null)
     nativePendingFlow.current = { kind: 'turn', sid }
     await beginRecording('recording-turn')
   }
@@ -690,19 +727,24 @@ export function AppGlasses() {
           }
         }, 4000)
       } else {
-        store.setNativeMirrorStatus('sending')
+        // Turn path: route the transcribed voice through the conversational
+        // brain. The brain either answers the user directly (from session
+        // context) or relays a well-formulated dev request to Claude internally
+        // (idle→deliver / busy→queue). We therefore do NOT call sendNativeMessage
+        // here and do NOT use the pending pin — Claude's response (when relayed)
+        // still streams in via the existing mirror SSE.
         store.enterMode('native-mirror')
-        // Pin the prompt on the HUD immediately as queued. It stays visible
-        // (dim) and is never lost. The backend always accepts the message: it
-        // either delivers it now (queued:false) or queues it server-side to
-        // deliver once Claude frees up (queued:true). Either way the SSE echo of
-        // the real user turn clears the pin when it actually lands.
-        store.addNativePending(text)
-        const { queued } = await sendNativeMessage(flow.sid, text)
-        // Delivered immediately → flip the pin to "sent" (◐). If queued, leave it
-        // as queued:true (⏳) until the backend drains it and the SSE echoes it.
-        if (!queued) store.markNativePendingSent(text)
-        store.setNativeMirrorStatus(null)
+        // Thinking placeholder so the HUD shows `🧠 …` immediately.
+        store.setNativeBrainReply('…')
+        try {
+          const { reply } = await brainMessage(flow.sid, text)
+          store.setNativeBrainReply(reply)
+          if (store.getState().voiceEnabled) speak(reply)
+        } catch (err) {
+          console.error('[glass] brain message failed:', err)
+          store.setNativeBrainReply(null)
+          store.setError('Brain failed')
+        }
       }
     } catch (err) {
       console.error('[glass] native recording flow failed:', err)

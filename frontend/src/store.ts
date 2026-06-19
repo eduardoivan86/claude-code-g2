@@ -74,6 +74,33 @@ export interface AppState {
   // (200), waiting for the mirror SSE to echo the real user turn. Either way the
   // text stays pinned on the HUD (dim) so the user never loses their message.
   nativePending: { text: string; queued: boolean }[]
+
+  // Whether spoken TTS output is enabled (the brain's "voice"). Persisted to
+  // localStorage so it survives reloads / background WebView restarts.
+  voiceEnabled: boolean
+  // The brain's spoken reply to the latest voice turn, pinned on the HUD near
+  // the top (🧠 …). '…' is a thinking placeholder; null = nothing to show.
+  // Cleared on the next user action (new recording) or on a timer.
+  nativeBrainReply: string | null
+}
+
+// ── voiceEnabled persistence (localStorage) ──────────────────────────────────
+const LS_VOICE = 'cc-g2:voiceEnabled'
+
+function readVoiceEnabled(): boolean {
+  try {
+    return localStorage.getItem(LS_VOICE) === '1'
+  } catch {
+    return false
+  }
+}
+
+function persistVoiceEnabled(v: boolean): void {
+  try {
+    localStorage.setItem(LS_VOICE, v ? '1' : '0')
+  } catch {
+    /* sandboxed / unavailable — in-memory only */
+  }
 }
 
 const initialState: AppState = {
@@ -120,6 +147,9 @@ const initialState: AppState = {
   nativeLoading: false,
   nativeAttention: false,
   nativePending: [],
+
+  voiceEnabled: readVoiceEnabled(),
+  nativeBrainReply: null,
 }
 
 let state: AppState = initialState
@@ -346,6 +376,7 @@ export const store = {
       nativeMirrorStatus: null,
       nativeAttention: false,
       nativePending: [],
+      nativeBrainReply: null,
       sessionScrollOffset: 0,
       lastActivityAt: Date.now(),
     })
@@ -410,6 +441,16 @@ export const store = {
   },
   setNativeMirrorStatus(status: NativeMirrorStatus): void {
     set({ nativeMirrorStatus: status })
+  },
+  // ── Brain voice / reply ───────────────────────────────────────────────────
+  // Toggle spoken TTS output. Persists to localStorage so it survives reloads.
+  setVoiceEnabled(v: boolean): void {
+    persistVoiceEnabled(v)
+    set({ voiceEnabled: v })
+  },
+  // Pin / clear the brain's spoken reply on the HUD (🧠 …).
+  setNativeBrainReply(v: string | null): void {
+    set({ nativeBrainReply: v, lastActivityAt: Date.now() })
   },
   clearNativeMirror(): void {
     set({

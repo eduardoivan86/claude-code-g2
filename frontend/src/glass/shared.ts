@@ -69,6 +69,11 @@ export interface AppSnapshot {
   // Pending voice follow-ups pinned on the HUD (queued = waiting for Claude,
   // !queued = sent, awaiting SSE confirm).
   nativePending: { text: string; queued: boolean }[]
+
+  // Whether spoken TTS output is enabled (the brain's "voice").
+  voiceEnabled: boolean
+  // The brain's spoken reply pinned near the top of the HUD (🧠 …); null = none.
+  nativeBrainReply: string | null
 }
 
 export interface AppActions {
@@ -110,4 +115,8 @@ export interface AppActions {
   markNativePendingSent(text: string): void          // queued → sent (awaiting SSE)
   removeNativePending(text: string): void            // SSE echoed the real turn → drop
   clearNativePending(): void
+
+  // ── Brain voice / reply ─────────────────────────────────────────────────
+  setVoiceEnabled(v: boolean): void                  // toggle spoken TTS output
+  setNativeBrainReply(v: string | null): void        // pin/clear the 🧠 reply
 }

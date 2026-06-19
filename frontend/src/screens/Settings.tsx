@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Badge, Button, Select, Divider } from 'even-toolkit/web'
+import { Badge, Button, Select, Divider, Toggle } from 'even-toolkit/web'
 import type { SelectOption } from 'even-toolkit/web'
 import { getSettings, saveSettings, type Settings as SettingsData, type PermissionMode } from '../api'
-import { useAppState } from '../store'
+import { store, useAppState } from '../store'
 
 const PERM_OPTS: { value: PermissionMode; label: string; hint: string }[] = [
   { value: 'bypassPermissions', label: 'Skip all (recommended)', hint: '--dangerously-skip-permissions' },
@@ -51,25 +51,54 @@ export function SettingsCard() {
     }
   }
 
-  if (!configured) return null
+  // The voice (TTS) toggle is a local, localStorage-backed preference — show it
+  // regardless of backend connection so it's always discoverable.
+  const voiceToggle = (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <div className="space-y-0.5">
+          <label className="text-normal-subtitle">Voz (TTS)</label>
+          <div className="text-normal-detail text-text-dim">
+            lee en voz alta las respuestas del cerebro · {state.voiceEnabled ? 'on' : 'off'}
+          </div>
+        </div>
+        <Toggle
+          checked={state.voiceEnabled}
+          onChange={(v) => store.setVoiceEnabled(v)}
+        />
+      </div>
+      <Divider />
+    </div>
+  )
+
+  if (!configured) return voiceToggle
 
   if (error && !settings) {
     return (
-      <div className="rounded bg-negative/10 px-3 py-2 flex items-center justify-between">
-        <span className="text-normal-detail text-negative">{error}</span>
-        <Button variant="ghost" size="sm" onClick={() => setError(null)}>×</Button>
+      <div className="space-y-3">
+        {voiceToggle}
+        <div className="rounded bg-negative/10 px-3 py-2 flex items-center justify-between">
+          <span className="text-normal-detail text-negative">{error}</span>
+          <Button variant="ghost" size="sm" onClick={() => setError(null)}>×</Button>
+        </div>
       </div>
     )
   }
 
   if (!settings) {
-    return <div className="text-normal-detail text-text-dim">loading settings…</div>
+    return (
+      <div className="space-y-3">
+        {voiceToggle}
+        <div className="text-normal-detail text-text-dim">loading settings…</div>
+      </div>
+    )
   }
 
   const permHint = PERM_OPTS.find((m) => m.value === settings.permissionMode)?.hint ?? ''
 
   return (
     <div className="space-y-3">
+      {voiceToggle}
       <div className="flex items-center justify-between">
         <span className="text-normal-subtitle">Settings</span>
         {saving && <Badge>saving…</Badge>}

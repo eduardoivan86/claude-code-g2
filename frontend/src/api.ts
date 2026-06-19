@@ -212,6 +212,25 @@ export async function sendNativeMessage(
   return { queued }
 }
 
+// ── Conversational "brain" ───────────────────────────────────────────────
+// Route a transcribed voice turn through the fast Groq brain. The backend
+// decides whether to answer the user directly from session context (returns a
+// spoken `reply`, `relayed:false`) or relay a well-formulated dev request to the
+// real Claude Code session via the idle→deliver / busy→queue path
+// (`relayed:true`). Claude's own response still streams in over the mirror SSE.
+export async function brainMessage(
+  sid: string,
+  text: string,
+): Promise<{ reply: string; relayed: boolean }> {
+  const res = await authFetch('/api/native/brain', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: sid, text }),
+  })
+  if (!res.ok) throw new Error(`brainMessage: ${res.status}`)
+  const body = (await res.json()) as { reply?: string; relayed?: boolean }
+  return { reply: body.reply ?? '', relayed: body.relayed ?? false }
+}
+
 // ── Active-session handoff ───────────────────────────────────────────────
 // The backend persists the "session you're actively working on" (set by the
 // glasses opening a session or the Mac `g2 handoff` command; cleared when the

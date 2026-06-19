@@ -124,12 +124,23 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
     // Each shown pending entry is one pinned line; "+N más" is one more.
     const pinnedLineCount = shownPending.length + (extraPending > 0 ? 1 : 0)
 
-    // The attention banner consumes one body row; pinned pending lines consume
-    // one each. Shrink the transcript window so the total stays at 10 lines and
-    // the footer hint is never clipped.
+    // The brain's spoken reply (🧠 …) sits prominently below the header, above
+    // the transcript. Wrap it and cap at ~3 lines so it never eats the HUD.
+    const BRAIN_CAP = 3
+    const brainReply = snapshot.nativeBrainReply
+    const brainLines = brainReply
+      ? wrapText(brainReply, FULL_COLS, '🧠 ').slice(0, BRAIN_CAP)
+      : []
+
+    // The attention banner consumes one body row; pinned pending lines and brain
+    // reply lines consume one each. Shrink the transcript window so the total
+    // stays at 10 lines and the footer hint is never clipped.
     const visibleCount = Math.max(
       1,
-      VISIBLE - (snapshot.nativeAttention ? 1 : 0) - pinnedLineCount,
+      VISIBLE -
+        (snapshot.nativeAttention ? 1 : 0) -
+        pinnedLineCount -
+        brainLines.length,
     )
     const allLines = turnsToLines(snapshot.nativeTurns)
     const totalLines = allLines.length
@@ -155,6 +166,10 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
       lines.push(line(`◆ ${truncate(sid.slice(0, 8), 16)} ${bar}`))
     }
     lines.push(separator())
+
+    // The brain's spoken reply (🧠 …) — prominent, normal style, just below the
+    // header/separator. '…' is the thinking placeholder while the brain works.
+    for (const l of brainLines) lines.push(line(l, 'normal'))
 
     // Pinned pending entries (dim): ⏳ = waiting for Claude (queued), ◐ = sent,
     // awaiting confirm. Always shown so the user's message is never lost.
