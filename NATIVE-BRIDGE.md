@@ -39,6 +39,30 @@ G2 glasses ──BLE──> phone (WebView) ──HTTPS+Bearer──> Mac backen
 | GET | `/api/native/sessions/:sid/stream` | SSE: replay + live-tail turns (`data: <Turn>`) |
 | POST | `/api/native/sessions/:sid/message` | `{prompt}` → resume & continue (409 if busy) |
 | POST | `/api/native/sessions` | `{cwd, prompt}` → start a new real session |
+| POST | `/api/native/handoff` | `{sessionId: string\|null}` → pin/clear the active session |
+| GET | `/api/native/handoff` | read the pinned session (`{sessionId, cwd, project, title}` or `{sessionId:null}`) |
+
+## Active-session handoff (▶ Continuar + background reconnect)
+
+The backend is the source of truth for **"the session you're actively working on"** — a tiny `~/.cc-g2/handoff.json` (`{ "sessionId": "<id>" }`, or `{}` when cleared). It's SET when the glasses open a session (or you run `g2 handoff`), and CLEARED when you back out of the mirror.
+
+On app init the glasses `GET /api/native/handoff`; if it resolves to a real transcript they auto-open that session's mirror. This delivers three things:
+
+1. **▶ Continuar** — a foreground launch resumes your active session.
+2. **`g2 handoff`** — pin from the Mac the session you're at the keyboard with, so the glasses pick it up.
+3. **Background notifications** — the headless background WebView's fresh load runs the same GET → reconnects the mirror SSE → the existing "Claude te espera" attention banner fires even with the phone pocketed.
+
+### `scripts/g2-handoff.sh` — pin from the Mac
+
+Run this **before you leave the desk** to pin the session you're working on:
+
+```bash
+./scripts/g2-handoff.sh             # auto-detect: newest ~/.claude/projects/*.jsonl (excl. /subagents/)
+./scripts/g2-handoff.sh <sessionId> # or pin an explicit session id
+PORT=9000 ./scripts/g2-handoff.sh   # non-default backend port
+```
+
+It reads the bearer token from `~/.cc-g2/config.json` and POSTs the session id to `http://127.0.0.1:${PORT:-8787}/api/native/handoff`. Requires `python3` + `curl`; the backend must be running.
 
 ## Transcription (pluggable, default Groq)
 

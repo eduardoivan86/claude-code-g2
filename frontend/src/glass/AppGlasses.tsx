@@ -11,12 +11,14 @@ import {
   bootstrap,
   createSession,
   deleteSession as apiDeleteSession,
+  getHandoff,
   getSession,
   listNativeProjects,
   listNativeSessions,
   nativeMirrorUrl,
   newNativeSession,
   sendNativeMessage,
+  setHandoff,
   sendTurn,
   SessionBusyError,
   SseClient,
@@ -173,6 +175,37 @@ export function AppGlasses() {
   useEffect(() => {
     if (!state.backendUrl || !state.token) return
     void bootstrap()
+  }, [state.backendUrl, state.token])
+
+  // Auto-resume the pinned active session ONCE per mount, after the connection
+  // is configured. The server is the source of truth (GET /api/native/handoff),
+  // so we don't depend on in-memory/localStorage state surviving — a fresh
+  // headless background WebView load runs this same path and reconnects the
+  // mirror SSE, which lets the existing "Claude te espera" attention banner fire
+  // with the phone pocketed. In the foreground it's the ▶ Continuar resume.
+  //
+  // Gated by a ref so it fires a single time per mount (not on every state
+  // change) and never fights manual navigation: if no handoff is set, or the
+  // user has already navigated away from `main`, we leave them where they are.
+  const autoResumedRef = useRef(false)
+  useEffect(() => {
+    if (!state.backendUrl || !state.token) return
+    if (autoResumedRef.current) return
+    autoResumedRef.current = true
+    void (async () => {
+      try {
+        const h = await getHandoff()
+        if (!h?.sessionId || !h.cwd) return
+        // Only auto-open if the user hasn't already navigated somewhere else
+        // since mount (avoid yanking them out of a screen they chose).
+        const mode = store.getState().mode
+        if (mode !== 'main' && mode !== 'unconfigured') return
+        store.openNativeMirror(h.sessionId, h.cwd)
+        store.enterMode('native-mirror')
+      } catch (err) {
+        console.warn('[glass] auto-resume handoff failed:', err)
+      }
+    })()
   }, [state.backendUrl, state.token])
 
   // Native mirror SSE — one EventSource per mirrored session id. The .jsonl for
@@ -525,6 +558,12 @@ export function AppGlasses() {
     openNativeSession(sid: string, cwd: string) {
       store.openNativeMirror(sid, cwd)
       store.enterMode('native-mirror')
+      // Pin this as the active session server-side so a relaunch (foreground
+      // ▶ Continuar) or the headless background WebView resumes it. Fire-and-
+      // forget — a failed pin shouldn't block opening the mirror.
+      void setHandoff(sid).catch((err) =>
+        console.warn('[glass] setHandoff (open) failed:', err),
+      )
     },
     startNativeNewSession() {
       void beginNativeNewSession()
@@ -546,6 +585,12 @@ export function AppGlasses() {
     nativeBack() {
       const mode = store.getState().mode
       if (mode === 'native-mirror') {
+        // Leaving the active session → clear the server-side pin so the app
+        // won't auto-reopen it next launch. Gated on mode === 'native-mirror'
+        // so the other (generic) back levels never touch the handoff.
+        void setHandoff(null).catch((err) =>
+          console.warn('[glass] setHandoff (clear) failed:', err),
+        )
         store.clearNativeMirror()
         store.enterMode('native-sessions')
       } else if (mode === 'native-sessions') {
@@ -600,6 +645,10 @@ export function AppGlasses() {
         store.enterMode('native-mirror')
         const sid = await newNativeSession(flow.cwd, text)
         store.openNativeMirror(sid, flow.cwd)
+        // Pin the freshly-started session as the active handoff too.
+        void setHandoff(sid).catch((err) =>
+          console.warn('[glass] setHandoff (new) failed:', err),
+        )
         // Optimistic echo: show the user's prompt on the HUD immediately
         // (deduped when the real turn arrives over SSE).
         store.pushNativeTurn({

@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
 import { Router, type Request, type Response } from 'express'
 import type { RuntimeConfig } from '../config.ts'
 import { ClaudeCodeProc } from '../sessions/claudeProc.ts'
@@ -45,9 +52,100 @@ function isUnsafeSegment(seg: string): boolean {
   return seg.includes('/') || seg.includes('\\') || seg.includes('..')
 }
 
+// -----------------------------------------------------------------------------
+// Active-session handoff record. The server is the source of truth for "the
+// session the user is actively working on". It's a tiny JSON file beside
+// config.json (~/.cc-g2/handoff.json) with shape `{ "sessionId": "<id>" }`, or
+// `{}` when cleared. It's SET when (a) the glasses open a session, or (b) the
+// Mac `g2 handoff` command runs; CLEARED when the user backs out of the mirror.
+//
+// On app init the glasses GET it and, if it resolves to a real session,
+// auto-open that session's mirror — which (foreground) gives ▶ Continuar and
+// (headless background) reconnects the mirror SSE so the attention banner can
+// still fire with the phone pocketed.
+// -----------------------------------------------------------------------------
+
+// Mirror config.ts: the config dir lives at ~/.cc-g2.
+function handoffDir(): string {
+  return join(homedir(), '.cc-g2')
+}
+function handoffPath(): string {
+  return join(handoffDir(), 'handoff.json')
+}
+
+function readHandoffSid(): string | null {
+  const p = handoffPath()
+  if (!existsSync(p)) return null
+  try {
+    const raw = readFileSync(p, 'utf8')
+    const obj = JSON.parse(raw) as { sessionId?: unknown }
+    const sid = obj?.sessionId
+    return typeof sid === 'string' && sid.length > 0 ? sid : null
+  } catch {
+    // Corrupt/unparseable handoff file behaves like "no handoff set".
+    return null
+  }
+}
+
+function writeHandoffSid(sid: string | null): void {
+  const dir = handoffDir()
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const body = sid ? JSON.stringify({ sessionId: sid }) : JSON.stringify({})
+  // 0600 like the token-bearing config file — it points at a working session.
+  writeFileSync(handoffPath(), body, { mode: 0o600 })
+}
+
 export function makeNativeRouter(deps: NativeRouterDeps): Router {
   const router = Router()
   const root = deps.projectsRoot ?? claudeProjectsDir()
+
+  // ----- active-session handoff (set/clear) ----------------------------------
+  // Body `{ sessionId: string | null }`. null/empty clears the pin.
+  router.post('/handoff', (req: Request, res: Response) => {
+    const body = req.body as { sessionId?: unknown }
+    const raw = body?.sessionId
+    const sid = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
+    // Reject ids that could escape the projects root (same guard as findSessionFile).
+    if (sid && (sid.includes('/') || sid.includes('\\') || sid.includes('..'))) {
+      res.status(400).json({ error: 'bad_session_id' })
+      return
+    }
+    try {
+      writeHandoffSid(sid)
+    } catch (err) {
+      console.error('[native:handoff] write failed:', err)
+      res.status(500).json({ error: 'write_failed' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
+  // ----- active-session handoff (read) ---------------------------------------
+  // Returns the pinned session enriched with cwd/project/title IFF it still
+  // resolves to a real transcript; otherwise `{ sessionId: null }`.
+  router.get('/handoff', (_req: Request, res: Response) => {
+    const sid = readHandoffSid()
+    if (!sid) {
+      res.json({ sessionId: null })
+      return
+    }
+    const file = findSessionFile(sid, root)
+    if (!file) {
+      res.json({ sessionId: null })
+      return
+    }
+    const meta = readSessionMeta(file)
+    if (!meta) {
+      res.json({ sessionId: null })
+      return
+    }
+    res.json({
+      sessionId: meta.sessionId,
+      cwd: meta.cwd,
+      project: meta.project,
+      title: meta.title,
+    })
+  })
 
   // ----- list projects -------------------------------------------------------
   router.get('/projects', (_req: Request, res: Response) => {

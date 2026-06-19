@@ -210,6 +210,36 @@ export async function sendNativeMessage(sid: string, prompt: string): Promise<vo
   if (!res.ok) throw new Error(`sendNativeMessage: ${res.status}`)
 }
 
+// ── Active-session handoff ───────────────────────────────────────────────
+// The backend persists the "session you're actively working on" (set by the
+// glasses opening a session or the Mac `g2 handoff` command; cleared when the
+// user backs out of the mirror). On init the glasses GET it and auto-resume.
+
+export interface HandoffInfo {
+  sessionId: string | null
+  cwd?: string
+  project?: string
+  title?: string
+}
+
+// Read the pinned active session. Returns `{ sessionId: null }` when none is
+// set or the pinned id no longer resolves to a real transcript.
+export async function getHandoff(): Promise<HandoffInfo> {
+  const res = await authFetch('/api/native/handoff')
+  if (!res.ok) throw new Error(`getHandoff: ${res.status}`)
+  return res.json() as Promise<HandoffInfo>
+}
+
+// Pin (or, with null, clear) the active session server-side. Fire-and-forget
+// at call sites — failures shouldn't block navigation.
+export async function setHandoff(sessionId: string | null): Promise<void> {
+  const res = await authFetch('/api/native/handoff', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
+  })
+  if (!res.ok) throw new Error(`setHandoff: ${res.status}`)
+}
+
 // Build the mirror SSE URL with the bearer token as a query param
 // (EventSource can't set headers). Returns null if not configured.
 export function nativeMirrorUrl(sid: string): string | null {
