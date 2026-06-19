@@ -1,5 +1,6 @@
 import type {
   AppMode,
+  BrainLogEntry,
   ConnectionStatus,
   NativeProjectSummary,
   NativeSessionSummary,
@@ -76,6 +77,9 @@ export interface AppSnapshot {
   scrollInverted: boolean
   // The brain's spoken reply pinned near the top of the HUD (🧠 …); null = none.
   nativeBrainReply: string | null
+  // Persisted brain exchanges, merged into the mirror timeline by timestamp so
+  // they appear inline with the real Claude turns at the moment they happened.
+  nativeBrainLog: BrainLogEntry[]
 }
 
 export interface AppActions {

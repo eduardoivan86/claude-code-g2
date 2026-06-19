@@ -42,6 +42,17 @@ export interface NativeTurn {
   timestamp: string
 }
 
+// One persisted brain-conversation exchange half. The backend writes a sidecar
+// JSONL (~/.cc-g2/brain-log/<sid>.jsonl) so ephemeral brain replies survive and
+// can be merged into the mirror timeline. ts is epoch ms (unlike NativeTurn's
+// ISO `timestamp`).
+export interface BrainLogEntry {
+  ts: number
+  role: 'brain-user' | 'brain'
+  text: string
+  relayed?: boolean
+}
+
 export interface NativeSessionSummary {
   sessionId: string
   filePath: string

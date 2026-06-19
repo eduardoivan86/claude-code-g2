@@ -1,5 +1,6 @@
 import type {
   BackendConfig,
+  BrainLogEntry,
   NativeProjectSummary,
   NativeSessionSummary,
   Session,
@@ -251,6 +252,16 @@ export async function brainMessage(
   if (!res.ok) throw new Error(`brainMessage: ${res.status}`)
   const body = (await res.json()) as { reply?: string; relayed?: boolean }
   return { reply: body.reply ?? '', relayed: body.relayed ?? false }
+}
+
+// ── Brain conversation sidecar log ───────────────────────────────────────
+// Read the persisted brain exchanges for a session (oldest first). These are
+// merged into the mirror timeline so the brain's replies appear inline with the
+// real Claude turns at the moment they happened. Returns [] on a missing log.
+export async function getBrainLog(sid: string): Promise<BrainLogEntry[]> {
+  const res = await authFetch(`/api/native/brain-log/${encodeURIComponent(sid)}`)
+  if (!res.ok) throw new Error(`getBrainLog: ${res.status}`)
+  return res.json() as Promise<BrainLogEntry[]>
 }
 
 // ── Active-session handoff ───────────────────────────────────────────────

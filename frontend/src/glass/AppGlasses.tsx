@@ -12,6 +12,7 @@ import {
   brainMessage,
   createSession,
   deleteSession as apiDeleteSession,
+  getBrainLog,
   getHandoff,
   getSession,
   listNativeProjects,
@@ -273,6 +274,27 @@ export function AppGlasses() {
     }
   }, [state.nativeMirrorSid, state.backendUrl, state.token])
 
+  // Load the persisted brain conversation log when a mirror opens, so prior
+  // brain exchanges merge into the timeline (and survive a reload / background
+  // restart). openNativeMirror already reset nativeBrainLog to []; this fills it
+  // from the backend sidecar. Guarded so a stale response for a session the user
+  // already left can't clobber the current one.
+  useEffect(() => {
+    const sid = state.nativeMirrorSid
+    if (!sid || !state.backendUrl || !state.token) return
+    let cancelled = false
+    void getBrainLog(sid)
+      .then((entries) => {
+        if (cancelled) return
+        if (store.getState().nativeMirrorSid !== sid) return
+        store.setNativeBrainLog(entries)
+      })
+      .catch((err) => console.warn('[glass] getBrainLog failed:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [state.nativeMirrorSid, state.backendUrl, state.token])
+
   // Speak the attention banner when Claude finishes and is now waiting on the
   // user — but only if voice is enabled. The HUD banner stays as-is regardless.
   // Fires on the false→true transition of nativeAttention.
@@ -347,6 +369,7 @@ export function AppGlasses() {
     voiceEnabled: state.voiceEnabled,
     scrollInverted: state.scrollInverted,
     nativeBrainReply: state.nativeBrainReply,
+    nativeBrainLog: state.nativeBrainLog,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -740,9 +763,20 @@ export function AppGlasses() {
         store.enterMode('native-mirror')
         // Thinking placeholder so the HUD shows `🧠 …` immediately.
         store.setNativeBrainReply('…')
+        // Timestamp the exchange now (client-side) for the optimistic merge; the
+        // server logs its own ts, but inline placement only needs to be roughly
+        // chronological. +1ms on the reply keeps a stable user→brain order.
+        const ts = Date.now()
         try {
-          const { reply } = await brainMessage(flow.sid, text)
+          const { reply, relayed } = await brainMessage(flow.sid, text)
           store.setNativeBrainReply(reply)
+          // Optimistically merge the exchange into the timeline so it shows
+          // inline immediately; it's also persisted server-side and reloaded on
+          // the next mirror open. appendNativeBrainLog dedupes exact repeats.
+          store.appendNativeBrainLog([
+            { ts, role: 'brain-user', text },
+            { ts: ts + 1, role: 'brain', text: reply, relayed },
+          ])
           if (store.getState().voiceEnabled) speak(reply)
         } catch (err) {
           console.error('[glass] brain message failed:', err)

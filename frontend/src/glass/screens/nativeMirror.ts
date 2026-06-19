@@ -1,6 +1,6 @@
 import type { GlassScreen } from 'even-toolkit/glass-screen-router'
 import type { AppSnapshot, AppActions } from '../shared'
-import type { NativeTurn } from '../../types'
+import type { BrainLogEntry, NativeTurn } from '../../types'
 import { line, separator } from '../theme'
 
 // Live mirror of one native ~/.claude session.
@@ -50,35 +50,90 @@ function wrapText(text: string, width: number, prefix = ''): string[] {
 // renderer can dim user/tool/thinking lines.
 interface MLine { text: string; style: 'normal' | 'meta' }
 
-function turnsToLines(turns: NativeTurn[]): MLine[] {
+// A timestamped block of display lines. Session turns and brain-log exchanges
+// are each turned into one of these, then sorted by `ts` so brain replies appear
+// INLINE in the session timeline at the moment they happened. `isUser` marks a
+// human-originated block so the renderer can insert the "───" turn separator.
+interface MItem { ts: number; lines: MLine[]; isUser: boolean }
+
+// Lines for a single native session turn (no leading separator — the merge step
+// owns separators so session + brain blocks interleave cleanly).
+function turnLines(t: NativeTurn): MLine[] {
+  const out: MLine[] = []
+  if (t.role === 'user') {
+    for (const l of wrapText(t.text, FULL_COLS, '> ')) out.push({ text: l, style: 'meta' })
+    return out
+  }
+  // assistant
+  // thinking: dimmed, 1 short line at most (keep the HUD readable).
+  if (t.thinking && t.thinking.trim()) {
+    const tline = wrapText(t.thinking, FULL_COLS, '~ ')[0]
+    if (tline) out.push({ text: tline, style: 'meta' })
+  }
+  // assistant text: prominent.
+  if (t.text && t.text.trim()) {
+    for (const l of wrapText(t.text, FULL_COLS, '│ ')) out.push({ text: l, style: 'normal' })
+  }
+  // tool uses: compact one-liners.
+  for (const tu of t.toolUses) {
+    const summary = tu.summary ? ' ' + truncate(tu.summary, 30) : ''
+    out.push({ text: truncate(`· ${tu.name}${summary}`, FULL_COLS), style: 'meta' })
+  }
+  return out
+}
+
+// Lines for a single brain-log entry. Visually distinct from real Claude turns:
+//   brain-user → "🗣 > <text>" in meta (dim) style — the user spoke this aloud.
+//   brain      → "🧠 <text>" in normal style — the brain's spoken reply.
+function brainEntryLines(e: BrainLogEntry): MLine[] {
+  if (e.role === 'brain-user') {
+    return wrapText(e.text, FULL_COLS, '🗣 > ').map((l) => ({ text: l, style: 'meta' as const }))
+  }
+  return wrapText(e.text, FULL_COLS, '🧠 ').map((l) => ({ text: l, style: 'normal' as const }))
+}
+
+// Merge session turns and brain-log entries into one chronological line list.
+// Session-turn timestamps are ISO strings; brain-log ts are epoch ms. Both are
+// normalized to epoch ms for sorting. A session turn missing/unparseable
+// timestamp keeps prior order via a monotonic fallback (last seen ts). The "───"
+// separator is inserted before each human-originated block (skipping the first),
+// matching the prior single-stream behaviour while letting brain blocks slot in.
+function mergeToLines(turns: NativeTurn[], brainLog: BrainLogEntry[]): MLine[] {
+  const items: MItem[] = []
+
+  // Session turns → MItems. Skip machine tool_result user turns entirely.
+  let lastTs = 0
+  for (const t of turns) {
+    if (t.role === 'user' && t.isToolResult) continue
+    const lines = turnLines(t)
+    if (lines.length === 0) continue
+    const parsed = t.timestamp ? Date.parse(t.timestamp) : NaN
+    // Fall back to the last seen ts so a missing/bad timestamp keeps prior order
+    // (a stable sort then preserves the original array order among equal ts).
+    const ts = Number.isFinite(parsed) ? parsed : lastTs
+    lastTs = ts
+    items.push({ ts, lines, isUser: t.role === 'user' })
+  }
+
+  // Brain-log entries → MItems (already epoch ms).
+  for (const e of brainLog) {
+    const lines = brainEntryLines(e)
+    if (lines.length === 0) continue
+    items.push({ ts: e.ts, lines, isUser: e.role === 'brain-user' })
+  }
+
+  // Stable sort by ts ascending. Array.prototype.sort is stable in modern JS, so
+  // equal-ts items keep their insertion order (session turns before brain for a
+  // given ms, which is the natural read order).
+  items.sort((a, b) => a.ts - b.ts)
+
+  // Flatten, inserting a "───" separator before each user/brain-user block
+  // except the very first block.
   const out: MLine[] = []
   let first = true
-  for (const t of turns) {
-    // Skip machine tool_result user turns entirely.
-    if (t.role === 'user' && t.isToolResult) continue
-
-    if (t.role === 'user') {
-      if (!first) out.push({ text: '───', style: 'meta' })
-      for (const l of wrapText(t.text, FULL_COLS, '> ')) out.push({ text: l, style: 'meta' })
-      first = false
-      continue
-    }
-
-    // assistant
-    // thinking: dimmed, 1 short line at most (keep the HUD readable).
-    if (t.thinking && t.thinking.trim()) {
-      const tline = wrapText(t.thinking, FULL_COLS, '~ ')[0]
-      if (tline) out.push({ text: tline, style: 'meta' })
-    }
-    // assistant text: prominent.
-    if (t.text && t.text.trim()) {
-      for (const l of wrapText(t.text, FULL_COLS, '│ ')) out.push({ text: l, style: 'normal' })
-    }
-    // tool uses: compact one-liners.
-    for (const tu of t.toolUses) {
-      const summary = tu.summary ? ' ' + truncate(tu.summary, 30) : ''
-      out.push({ text: truncate(`· ${tu.name}${summary}`, FULL_COLS), style: 'meta' })
-    }
+  for (const it of items) {
+    if (it.isUser && !first) out.push({ text: '───', style: 'meta' })
+    for (const l of it.lines) out.push(l)
     first = false
   }
   return out
@@ -124,12 +179,16 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
     // Each shown pending entry is one pinned line; "+N más" is one more.
     const pinnedLineCount = shownPending.length + (extraPending > 0 ? 1 : 0)
 
-    // The brain's spoken reply (🧠 …) sits prominently below the header, above
-    // the transcript. Wrap it and cap at ~3 lines so it never eats the HUD.
+    // The brain's spoken reply now lives INLINE in the merged timeline (see
+    // mergeToLines), so the top pin is used ONLY for the transient "🧠 …"
+    // thinking placeholder while the brain works — once the real reply resolves
+    // it's appended to nativeBrainLog and rendered inline, avoiding a double
+    // render. So pin only when the reply is the placeholder.
     const BRAIN_CAP = 3
     const brainReply = snapshot.nativeBrainReply
-    const brainLines = brainReply
-      ? wrapText(brainReply, FULL_COLS, '🧠 ').slice(0, BRAIN_CAP)
+    const showBrainPin = brainReply !== null && brainReply.trim() === '…'
+    const brainLines = showBrainPin
+      ? wrapText(brainReply!, FULL_COLS, '🧠 ').slice(0, BRAIN_CAP)
       : []
 
     // The attention banner consumes one body row; pinned pending lines and brain
@@ -142,7 +201,7 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
         pinnedLineCount -
         brainLines.length,
     )
-    const allLines = turnsToLines(snapshot.nativeTurns)
+    const allLines = mergeToLines(snapshot.nativeTurns, snapshot.nativeBrainLog ?? [])
     const totalLines = allLines.length
     const maxOffset = Math.max(0, totalLines - visibleCount)
     const offset = Math.min(snapshot.sessionScrollOffset, maxOffset)
@@ -167,8 +226,8 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
     }
     lines.push(separator())
 
-    // The brain's spoken reply (🧠 …) — prominent, normal style, just below the
-    // header/separator. '…' is the thinking placeholder while the brain works.
+    // The transient "🧠 …" thinking placeholder — prominent, normal style, just
+    // below the header/separator. The resolved reply renders inline (merged).
     for (const l of brainLines) lines.push(line(l, 'normal'))
 
     // Pinned pending entries (dim): ⏳ = waiting for Claude (queued), ◐ = sent,

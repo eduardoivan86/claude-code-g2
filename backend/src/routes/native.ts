@@ -18,6 +18,7 @@ import { emitAttention, onAttention } from '../native/bus'
 import { deliverToSession } from '../native/deliver'
 import { enqueue } from '../native/queue'
 import { runBrain } from '../native/brain'
+import { appendBrainLog, readBrainLog } from '../native/brainLog'
 import { ttsConfigFromEnv } from '../native/ttsConfig.ts'
 import { synthesize } from '../native/tts.ts'
 
@@ -278,11 +279,35 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         recent,
         getConfig: deps.getConfig,
       })
+      // Persist the exchange to a per-session sidecar log so it can be MERGED
+      // into the mirror timeline (Option A) and survive for later reading. We do
+      // NOT touch Claude's real transcript. A single timestamp keys both halves
+      // of the exchange; +1ms on the reply keeps a stable user→brain ordering.
+      const ts = Date.now()
+      try {
+        appendBrainLog(sid, [
+          { ts, role: 'brain-user', text },
+          { ts: ts + 1, role: 'brain', text: out.reply, relayed: out.relayed },
+        ])
+      } catch (logErr) {
+        // The sidecar log is best-effort — a write failure must not fail the
+        // brain reply the user is waiting on.
+        console.error('[native:brain] sidecar log write failed:', logErr)
+      }
       res.status(200).json({ reply: out.reply, relayed: out.relayed })
     } catch (err) {
       console.error('[native:brain] failed:', err)
       res.status(502).json({ error: 'brain_failed' })
     }
+  })
+
+  // ----- brain conversation sidecar log (read) -------------------------------
+  // Returns the persisted brain exchanges for a session (oldest first) so the
+  // mirror can merge them into the session timeline. Bad/unsafe sids resolve to
+  // an empty array via readBrainLog's own guard.
+  router.get('/brain-log/:sid', (req: Request, res: Response) => {
+    const sid = String(req.params.sid)
+    res.json(readBrainLog(sid))
   })
 
   // ----- text-to-speech (natural cloud voice with browser fallback) ----------

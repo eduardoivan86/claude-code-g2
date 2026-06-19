@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import type {
   AppMode,
   BackendConfig,
+  BrainLogEntry,
   ConnectionStatus,
   NativeProjectSummary,
   NativeSessionSummary,
@@ -85,6 +86,10 @@ export interface AppState {
   // the top (🧠 …). '…' is a thinking placeholder; null = nothing to show.
   // Cleared on the next user action (new recording) or on a timer.
   nativeBrainReply: string | null
+  // Persisted brain-conversation exchanges for the open session (oldest first).
+  // Loaded from the backend sidecar on mirror open and appended optimistically
+  // after each exchange; merged with nativeTurns by timestamp in the mirror.
+  nativeBrainLog: BrainLogEntry[]
 }
 
 // ── voiceEnabled persistence (localStorage) ──────────────────────────────────
@@ -173,6 +178,7 @@ const initialState: AppState = {
   voiceEnabled: readVoiceEnabled(),
   scrollInverted: readScrollInverted(),
   nativeBrainReply: null,
+  nativeBrainLog: [],
 }
 
 let state: AppState = initialState
@@ -338,7 +344,18 @@ export const store = {
         s + Math.ceil((t.text?.length ?? 0) / 36) + (t.thinking ? 1 : 0) + t.toolUses.length + 1,
       0,
     )
-    const maxOffset = Math.max(0, state.activeTranscript.length, nativeLines)
+    // Merged brain-log lines also occupy the transcript window, so include a
+    // generous estimate (~text/36 + 1 per entry) or the offset would clamp short
+    // and merged brain exchanges past the turn estimate wouldn't scroll into view.
+    const brainLogLines = state.nativeBrainLog.reduce(
+      (s, e) => s + Math.ceil((e.text?.length ?? 0) / 36) + 1,
+      0,
+    )
+    const maxOffset = Math.max(
+      0,
+      state.activeTranscript.length,
+      nativeLines + brainLogLines,
+    )
     set({ sessionScrollOffset: Math.max(0, Math.min(n, maxOffset)), lastActivityAt: Date.now() })
   },
 
@@ -400,6 +417,7 @@ export const store = {
       nativeAttention: false,
       nativePending: [],
       nativeBrainReply: null,
+      nativeBrainLog: [],
       sessionScrollOffset: 0,
       lastActivityAt: Date.now(),
     })
@@ -480,6 +498,27 @@ export const store = {
   setNativeBrainReply(v: string | null): void {
     set({ nativeBrainReply: v, lastActivityAt: Date.now() })
   },
+  // ── Brain conversation sidecar log ────────────────────────────────────────
+  // Replace the whole brain log (loaded from the backend on mirror open).
+  setNativeBrainLog(entries: BrainLogEntry[]): void {
+    set({ nativeBrainLog: entries })
+  },
+  // Optimistically append exchange entries right after a brain reply resolves so
+  // they show inline in the timeline immediately (the server also persisted
+  // them). Skips an exact ts+role+text duplicate so a later reload/merge can't
+  // double-render the same entry.
+  appendNativeBrainLog(entries: BrainLogEntry[]): void {
+    if (entries.length === 0) return
+    const existing = state.nativeBrainLog
+    const fresh = entries.filter(
+      (e) =>
+        !existing.some(
+          (x) => x.ts === e.ts && x.role === e.role && x.text === e.text,
+        ),
+    )
+    if (fresh.length === 0) return
+    set({ nativeBrainLog: [...existing, ...fresh], lastActivityAt: Date.now() })
+  },
   clearNativeMirror(): void {
     set({
       nativeMirrorSid: null,
@@ -487,6 +526,7 @@ export const store = {
       nativeTurns: [],
       nativeMirrorStatus: null,
       nativePending: [],
+      nativeBrainLog: [],
     })
   },
 }
