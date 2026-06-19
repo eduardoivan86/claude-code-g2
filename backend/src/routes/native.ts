@@ -11,12 +11,13 @@ import { Router, type Request, type Response } from 'express'
 import type { RuntimeConfig } from '../config.ts'
 import { ClaudeCodeProc } from '../sessions/claudeProc.ts'
 import { claudeProjectsDir, findSessionFile } from '../native/paths'
-import { listProjects, listSessions, readSessionMeta } from '../native/nativeSessions'
+import { listProjects, listSessions, readSessionMeta, readRecentTurns } from '../native/nativeSessions'
 import { tailSession } from '../native/tailer'
 import { isSessionIdle } from '../native/idleGuard'
 import { emitAttention, onAttention } from '../native/bus'
 import { deliverToSession } from '../native/deliver'
 import { enqueue } from '../native/queue'
+import { runBrain } from '../native/brain'
 
 // -----------------------------------------------------------------------------
 // "Native sessions" HTTP API.
@@ -241,6 +242,45 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
       { getConfig: deps.getConfig, projectsRoot: root },
     )
     res.status(202).json({ ok: true, queued: true })
+  })
+
+  // ----- conversational "brain" ----------------------------------------------
+  // Body `{ sessionId, text }`. A fast Groq LLM decides whether to answer the
+  // user directly from the session's recent context, or relay a well-formulated
+  // dev request to the real Claude Code session (via the same idle→deliver /
+  // busy→queue path the message route uses). Returns the spoken reply for the HUD.
+  router.post('/brain', async (req: Request, res: Response) => {
+    const body = req.body as { sessionId?: unknown; text?: unknown }
+    const sid = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (!text) {
+      res.status(400).json({ error: 'text required' })
+      return
+    }
+    const file = findSessionFile(sid, root)
+    if (!file) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    const meta = readSessionMeta(file)
+    if (!meta) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    const recent = readRecentTurns(file, 30)
+    try {
+      const out = await runBrain({
+        sessionId: sid,
+        cwd: meta.cwd,
+        userText: text,
+        recent,
+        getConfig: deps.getConfig,
+      })
+      res.status(200).json({ reply: out.reply, relayed: out.relayed })
+    } catch (err) {
+      console.error('[native:brain] failed:', err)
+      res.status(502).json({ error: 'brain_failed' })
+    }
   })
 
   // ----- start a brand-new native session ------------------------------------
