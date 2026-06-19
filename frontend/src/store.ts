@@ -78,6 +78,9 @@ export interface AppState {
   // Whether spoken TTS output is enabled (the brain's "voice"). Persisted to
   // localStorage so it survives reloads / background WebView restarts.
   voiceEnabled: boolean
+  // Mirror scroll direction. false (default): swipe DOWN = older history.
+  // true: swipe UP = older. Persisted to localStorage.
+  scrollInverted: boolean
   // The brain's spoken reply to the latest voice turn, pinned on the HUD near
   // the top (🧠 …). '…' is a thinking placeholder; null = nothing to show.
   // Cleared on the next user action (new recording) or on a timer.
@@ -98,6 +101,25 @@ function readVoiceEnabled(): boolean {
 function persistVoiceEnabled(v: boolean): void {
   try {
     localStorage.setItem(LS_VOICE, v ? '1' : '0')
+  } catch {
+    /* sandboxed / unavailable — in-memory only */
+  }
+}
+
+// ── scrollInverted persistence (localStorage) ────────────────────────────────
+const LS_SCROLL_INVERTED = 'cc-g2:scrollInverted'
+
+function readScrollInverted(): boolean {
+  try {
+    return localStorage.getItem(LS_SCROLL_INVERTED) === '1'
+  } catch {
+    return false
+  }
+}
+
+function persistScrollInverted(v: boolean): void {
+  try {
+    localStorage.setItem(LS_SCROLL_INVERTED, v ? '1' : '0')
   } catch {
     /* sandboxed / unavailable — in-memory only */
   }
@@ -149,6 +171,7 @@ const initialState: AppState = {
   nativePending: [],
 
   voiceEnabled: readVoiceEnabled(),
+  scrollInverted: readScrollInverted(),
   nativeBrainReply: null,
 }
 
@@ -447,6 +470,11 @@ export const store = {
   setVoiceEnabled(v: boolean): void {
     persistVoiceEnabled(v)
     set({ voiceEnabled: v })
+  },
+  // Toggle mirror scroll direction. Persists to localStorage.
+  setScrollInverted(v: boolean): void {
+    persistScrollInverted(v)
+    set({ scrollInverted: v })
   },
   // Pin / clear the brain's spoken reply on the HUD (🧠 …).
   setNativeBrainReply(v: string | null): void {

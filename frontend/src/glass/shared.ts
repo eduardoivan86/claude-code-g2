@@ -72,6 +72,8 @@ export interface AppSnapshot {
 
   // Whether spoken TTS output is enabled (the brain's "voice").
   voiceEnabled: boolean
+  // Mirror scroll direction. false: swipe DOWN = older. true: swipe UP = older.
+  scrollInverted: boolean
   // The brain's spoken reply pinned near the top of the HUD (🧠 …); null = none.
   nativeBrainReply: string | null
 }
@@ -118,5 +120,6 @@ export interface AppActions {
 
   // ── Brain voice / reply ─────────────────────────────────────────────────
   setVoiceEnabled(v: boolean): void                  // toggle spoken TTS output
+  setScrollInverted(v: boolean): void                // toggle mirror scroll direction
   setNativeBrainReply(v: string | null): void        // pin/clear the 🧠 reply
 }

@@ -345,6 +345,7 @@ export function AppGlasses() {
     nativeAttention: state.nativeAttention,
     nativePending: state.nativePending,
     voiceEnabled: state.voiceEnabled,
+    scrollInverted: state.scrollInverted,
     nativeBrainReply: state.nativeBrainReply,
   }
   const snapshotRef = useRef(snapshot)
@@ -656,6 +657,9 @@ export function AppGlasses() {
     // ── Brain voice / reply ───────────────────────────────────────────────
     setVoiceEnabled(v: boolean) {
       store.setVoiceEnabled(v)
+    },
+    setScrollInverted(v: boolean) {
+      store.setScrollInverted(v)
     },
     setNativeBrainReply(v: string | null) {
       store.setNativeBrainReply(v)

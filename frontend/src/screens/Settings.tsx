@@ -67,6 +67,20 @@ export function SettingsCard() {
           onChange={(v) => store.setVoiceEnabled(v)}
         />
       </div>
+      <div className="flex items-center justify-between">
+        <div className="space-y-0.5">
+          <label className="text-normal-subtitle">Scroll invertido</label>
+          <div className="text-normal-detail text-text-dim">
+            {state.scrollInverted
+              ? 'deslizá ARRIBA para ver mensajes más viejos'
+              : 'deslizá ABAJO para ver mensajes más viejos'}
+          </div>
+        </div>
+        <Toggle
+          checked={state.scrollInverted}
+          onChange={(v) => store.setScrollInverted(v)}
+        />
+      </div>
       <Divider />
     </div>
   )
