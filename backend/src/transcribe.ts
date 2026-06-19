@@ -85,7 +85,9 @@ export async function transcribeHandler(req: Request, res: Response): Promise<vo
       ...(languageSingleton ? { language: languageSingleton } : {}),
       response_format: 'json',
     })
-    res.json({ text: result.text.trim() })
+    const text = result.text.trim()
+    console.log(`[transcribe] lang=${languageSingleton ?? 'auto'} model=${modelSingleton} -> ${JSON.stringify(text.slice(0, 80))}`)
+    res.json({ text })
   } catch (err) {
     console.error('[transcribe] openai error:', err)
     res.status(502).json({ error: 'transcription_failed' })

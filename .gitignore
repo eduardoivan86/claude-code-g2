@@ -27,3 +27,6 @@ frontend/glasses_*.png
 
 # Even Hub package build artifact
 *.ehpk
+
+# Generated app-icon artifacts (uploaded to Even Hub, not source)
+claude-in-sight-icon-*.png
