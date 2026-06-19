@@ -1,6 +1,6 @@
 // backend/src/native/brain.test.ts
 import { test, expect } from "bun:test";
-import { cleanReplyText, extractLeakedRelayMessage } from "./brain";
+import { cleanReplyText, parseBrainDecision } from "./brain";
 
 // ── cleanReplyText: the user-facing reply must never contain `<function` ──────
 
@@ -30,26 +30,70 @@ test("cleanReplyText handles empty / undefined-ish input", () => {
   expect(cleanReplyText("")).toBe("");
 });
 
-// ── extractLeakedRelayMessage: best-effort recover a leaked relay intent ──────
+// ── parseBrainDecision: strict JSON structured-output parsing ─────────────────
 
-test("extractLeakedRelayMessage parses JSON message from inline form", () => {
-  const input =
-    'ok <function=relay_to_claude{"message":"editá el README"}>';
-  expect(extractLeakedRelayMessage(input)).toBe("editá el README");
+test("parseBrainDecision parses a plain answer object", () => {
+  const d = parseBrainDecision('{"action":"answer","reply":"hola"}');
+  expect(d.action).toBe("answer");
+  expect(d.reply).toBe("hola");
+  expect(d.message).toBe("");
 });
 
-test("extractLeakedRelayMessage parses JSON message from closed-block form", () => {
-  const input =
-    '<function=relay_to_claude>{"message":"corré bun test"}</function>';
-  expect(extractLeakedRelayMessage(input)).toBe("corré bun test");
+test("parseBrainDecision parses a relay object with a message", () => {
+  const d = parseBrainDecision(
+    '{"action":"relay","reply":"ok","message":"add a test"}',
+  );
+  expect(d.action).toBe("relay");
+  expect(d.reply).toBe("ok");
+  expect(d.message).toBe("add a test");
 });
 
-test("extractLeakedRelayMessage falls back to plain text after the tag", () => {
-  const input = "<function=relay_to_claude arreglá el bug del login>";
-  expect(extractLeakedRelayMessage(input)).toBe("arreglá el bug del login");
+test("parseBrainDecision strips ```json fences before parsing", () => {
+  const d = parseBrainDecision(
+    '```json\n{"action":"answer","reply":"con fence"}\n```',
+  );
+  expect(d.action).toBe("answer");
+  expect(d.reply).toBe("con fence");
 });
 
-test("extractLeakedRelayMessage returns null when no relay artifact present", () => {
-  expect(extractLeakedRelayMessage("Todo en orden, nada que hacer.")).toBeNull();
-  expect(extractLeakedRelayMessage("")).toBeNull();
+test("parseBrainDecision strips a bare ``` fence before parsing", () => {
+  const d = parseBrainDecision('```\n{"action":"relay","message":"haz X","reply":"dale"}\n```');
+  expect(d.action).toBe("relay");
+  expect(d.message).toBe("haz X");
+});
+
+test("parseBrainDecision falls back to answer on invalid JSON (no relay)", () => {
+  const d = parseBrainDecision("esto no es json");
+  expect(d.action).toBe("answer");
+  expect(d.reply).toBe("esto no es json");
+  expect(d.message).toBe("");
+});
+
+test("parseBrainDecision falls back to answer when action is missing", () => {
+  const d = parseBrainDecision('{"reply":"sin action"}');
+  // No valid `action` → defensive answer using the cleaned raw text.
+  expect(d.action).toBe("answer");
+  expect(d.message).toBe("");
+});
+
+test("parseBrainDecision falls back to answer on an unknown action", () => {
+  const d = parseBrainDecision('{"action":"explode","reply":"boom"}');
+  expect(d.action).toBe("answer");
+  expect(d.message).toBe("");
+});
+
+test("parseBrainDecision scrubs leaked <function> from the fallback reply", () => {
+  const d = parseBrainDecision(
+    'texto suelto <function=relay_to_claude{"message":"x"}>',
+  );
+  expect(d.action).toBe("answer");
+  expect(d.reply).toBe("texto suelto");
+  expect(d.reply.includes("<function")).toBe(false);
+});
+
+test("parseBrainDecision handles empty input as an empty answer", () => {
+  const d = parseBrainDecision("");
+  expect(d.action).toBe("answer");
+  expect(d.reply).toBe("");
+  expect(d.message).toBe("");
 });

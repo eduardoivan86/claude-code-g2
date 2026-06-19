@@ -1,9 +1,6 @@
 // backend/src/native/brain.ts
 import OpenAI from "openai";
-import type {
-  ChatCompletionMessageParam,
-  ChatCompletionTool,
-} from "openai/resources/chat/completions";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { Turn } from "./types";
 import { findSessionFile } from "./paths";
 import { isSessionIdle } from "./idleGuard";
@@ -20,41 +17,30 @@ import { enqueue } from "./queue";
 //   (b) RELAYS a well-formulated dev request to Claude Code via the SAME
 //       resume/queue path the message route uses (so busy→queue still works).
 //
+// Decision + payload are produced via STRICT JSON structured output (Groq JSON
+// mode) instead of OpenAI tool-calling. The llama-3.3-70b model is unreliable
+// with tool-calling on Groq — it leaks `<function=relay_to_claude…>` into the
+// text even for plain context questions, which caused false relays that woke
+// Claude unnecessarily. JSON mode is deterministic and avoids that failure mode.
+//
 // Runs server-side: the Groq key never leaves the backend.
 // -----------------------------------------------------------------------------
 
-// System prompt tuned for the glasses HUD (small screen, ~10 lines). Verbatim.
-const SYSTEM_PROMPT = `Sos "el cerebro", una interfaz de voz para Claude Code en gafas AR (pantalla chica, ~10 líneas). Tenés el contexto de la sesión de desarrollo del usuario.
+// System prompt tuned for the glasses HUD (small screen) + Spanish.
+// NOTE: Groq JSON mode requires the literal word "JSON" somewhere in the
+// prompt — it is present below. Verbatim.
+const SYSTEM_PROMPT = `Sos "el cerebro", una interfaz de voz para Claude Code en gafas AR. Tenés el contexto de la sesión de desarrollo del usuario.
+Respondé SIEMPRE con UN ÚNICO objeto JSON válido, sin texto fuera del JSON, con esta forma:
+{"action":"answer"|"relay","reply":"<lo que le decís al usuario, en SU idioma, 1-2 frases cortas, sin markdown>","message":"<solo si action=relay: el pedido de desarrollo bien formulado para Claude Code>"}
 Reglas:
-- Respondé SIEMPRE en el idioma del usuario, MUY corto (1-2 frases, sin markdown, sin listas).
-- Si el usuario pide una acción de desarrollo (escribir/editar código, correr algo, investigar el repo, etc.), usá la tool relay_to_claude con el mensaje bien formulado para Claude Code, y confirmá en 1 frase qué le pediste.
-- Si el usuario pregunta algo que podés responder con el contexto de la sesión (qué hizo Claude, en qué está, un resumen), respondé vos directo, SIN usar la tool.
-- Si es ambiguo, preferí UNA pregunta corta antes de mandar a Claude.
-- Nunca leas en voz alta IDs internos de sesión.`;
+- action="relay" SOLO para acciones de desarrollo (escribir/editar código, correr algo, investigar el repo). En "message" poné el pedido claro para Claude; en "reply" confirmá en 1 frase qué le pediste.
+- action="answer" para preguntas que podés responder con el contexto de la sesión (qué hizo, en qué está, un resumen). NO uses relay para esto.
+- Si es ambiguo, action="answer" y pedí UNA aclaración corta.
+- Nunca incluyas IDs internos de sesión.`;
 
 // Per-turn text cap, and how many recent turns to feed as context.
 const MAX_TURN_CHARS = 400;
 const MAX_CONTEXT_TURNS = 20;
-
-const RELAY_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "relay_to_claude",
-    description:
-      "Send a well-formulated development request to the Claude Code agent that is working in this project. Use for any coding/file/run/research task.",
-    parameters: {
-      type: "object",
-      properties: {
-        message: {
-          type: "string",
-          description:
-            "The well-formulated request to send to Claude Code, in the user's language.",
-        },
-      },
-      required: ["message"],
-    },
-  },
-};
 
 // Structural slice of the runtime config the relay path needs. Matches the
 // route's NativeConfig / DeliverConfig so callers pass the same getConfig().
@@ -74,21 +60,24 @@ export interface RunBrainResult {
   relayedMessage?: string;
 }
 
+// The strict shape the brain emits as JSON. All fields optional at parse time
+// since the model is the source of truth and we defend against malformed output.
+export interface BrainDecision {
+  action: "answer" | "relay";
+  reply: string;
+  message: string;
+}
+
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) : s;
 }
 
 // -----------------------------------------------------------------------------
-// Tool-call artifact hardening.
+// Reply text hardening.
 //
-// The Groq llama-3.3-70b model sometimes leaks a native-format tool call into
-// the TEXT content instead of (or in addition to) returning a proper OpenAI
-// `tool_calls` entry, e.g. the reply ends with:
-//   ...restringida. <function=relay_to_claude{"message":"…"}>
-// or a fully closed block:
-//   <function=relay_to_claude>{"message":"…"}</function>
-// The user-facing `reply` must NEVER contain a `<function` artifact, and a relay
-// intent expressed this way must not be silently dropped.
+// With JSON mode the model should never emit a native tool-call artifact, but
+// keep a small defensive scrub on the FINAL user-facing reply just in case the
+// model echoes a stray `<function…>` token inside the JSON `reply` string.
 // -----------------------------------------------------------------------------
 
 // Pure function: strip any leaked `<function=…>` tool-call artifact from the
@@ -105,57 +94,40 @@ export function cleanReplyText(text: string): string {
   return out.trim();
 }
 
-// Best-effort: extract the relay `message` from a leaked native-format tool call
-// embedded in the raw text. Handles both:
-//   <function=relay_to_claude{"message":"…"}>
-//   <function=relay_to_claude>{"message":"…"}</function>
-// Tries to JSON-parse the first `{…}` after the tag for a `message` field; if
-// that fails, falls back to the plain text after the tag up to `>`/`</function>`.
-// Returns null when no `relay_to_claude` artifact is present.
-export function extractLeakedRelayMessage(text: string): string | null {
-  if (!text) return null;
-  const tag = "<function=relay_to_claude";
-  const tagIdx = text.indexOf(tag);
-  if (tagIdx < 0) return null;
-  const after = text.slice(tagIdx + tag.length);
+// -----------------------------------------------------------------------------
+// JSON parsing.
+//
+// Strip ```json fences if the model wrapped the object, then JSON.parse. If the
+// parse fails or `action` is missing, treat the whole thing as an "answer" whose
+// reply is the cleaned raw text — defensive so we never accidentally relay.
+// Exported for unit testing.
+// -----------------------------------------------------------------------------
+export function parseBrainDecision(raw: string): BrainDecision {
+  const text = (raw ?? "").trim();
 
-  // Try to find a balanced {…} object after the tag and JSON-parse it.
-  const braceStart = after.indexOf("{");
-  if (braceStart >= 0) {
-    let depth = 0;
-    let end = -1;
-    for (let i = braceStart; i < after.length; i++) {
-      const ch = after[i];
-      if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
+  // Strip a ```json … ``` or ``` … ``` fence if present.
+  let body = text;
+  const fence = body.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fence && fence[1] !== undefined) body = fence[1].trim();
+
+  try {
+    const parsed = JSON.parse(body) as Partial<BrainDecision> & {
+      action?: unknown;
+    };
+    if (parsed && (parsed.action === "answer" || parsed.action === "relay")) {
+      const reply =
+        typeof parsed.reply === "string" ? parsed.reply : "";
+      const message =
+        typeof parsed.message === "string" ? parsed.message : "";
+      return { action: parsed.action, reply, message };
     }
-    if (end >= 0) {
-      const objText = after.slice(braceStart, end + 1);
-      try {
-        const parsed = JSON.parse(objText) as { message?: unknown };
-        if (typeof parsed.message === "string" && parsed.message.trim()) {
-          return parsed.message.trim();
-        }
-      } catch {
-        // Fall through to the plain-text fallback below.
-      }
-    }
+  } catch {
+    // Fall through to the defensive answer below.
   }
 
-  // Fallback: take the text after the tag up to the first `>` or `</function>`.
-  let rest = after;
-  const closeFn = rest.indexOf("</function>");
-  if (closeFn >= 0) rest = rest.slice(0, closeFn);
-  const gt = rest.indexOf(">");
-  if (gt >= 0) rest = rest.slice(0, gt);
-  const cleaned = rest.replace(/^[>\s{]+/, "").trim();
-  return cleaned || null;
+  // Parse failed or `action` missing/invalid → defensively answer with the
+  // cleaned raw text so we never relay on malformed output.
+  return { action: "answer", reply: cleanReplyText(text), message: "" };
 }
 
 // Relay a message to the session using the SAME logic as the message route:
@@ -199,10 +171,9 @@ export async function runBrain(opts: RunBrainOpts): Promise<RunBrainResult> {
     completion = await client.chat.completions.create({
       model,
       messages,
-      tools: [RELAY_TOOL],
-      tool_choice: "auto",
-      temperature: 0.3,
-      max_tokens: 300,
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+      max_tokens: 400,
     });
   } catch (err) {
     // Surface a clear error so the route can return 502.
@@ -211,52 +182,21 @@ export async function runBrain(opts: RunBrainOpts): Promise<RunBrainResult> {
     );
   }
 
-  const choice = completion.choices[0];
-  const msg = choice?.message;
-  const rawContent = msg?.content ?? "";
-  // The user-facing reply must NEVER contain a `<function` artifact.
-  const content = cleanReplyText(rawContent);
-  const toolCall = msg?.tool_calls?.find(
-    (c) => c.type === "function" && c.function?.name === "relay_to_claude",
-  );
+  const rawContent = completion.choices[0]?.message?.content ?? "";
+  const decision = parseBrainDecision(rawContent);
 
-  // PRIMARY path: a proper OpenAI tool_calls entry.
-  if (toolCall && toolCall.type === "function") {
-    let relayMessage = "";
-    try {
-      const args = JSON.parse(toolCall.function.arguments || "{}") as {
-        message?: unknown;
-      };
-      if (typeof args.message === "string") relayMessage = args.message.trim();
-    } catch {
-      // Malformed tool args — fall back to the user's own text so we still relay
-      // something coherent rather than dropping the request.
-      relayMessage = opts.userText.trim();
-    }
-    if (!relayMessage) relayMessage = opts.userText.trim();
+  // Defensive scrub on the FINAL user-facing reply.
+  const reply = cleanReplyText(decision.reply);
+  const message = decision.message.trim();
 
-    relayToSession(opts.sessionId, opts.cwd, relayMessage, opts.getConfig());
-
+  if (decision.action === "relay" && message) {
+    relayToSession(opts.sessionId, opts.cwd, message, opts.getConfig());
     return {
-      reply: content || "Listo, se lo pasé a Claude.",
+      reply: reply || "Listo, se lo pasé a Claude.",
       relayed: true,
-      relayedMessage: relayMessage,
+      relayedMessage: message,
     };
   }
 
-  // FALLBACK path: no proper tool_call, but the model leaked a native-format
-  // `<function=relay_to_claude …>` into the text. Best-effort extract the
-  // message and relay it via the SAME idle→deliver / busy→queue path so the
-  // user's relay intent isn't lost just because the model mis-formatted it.
-  const leaked = extractLeakedRelayMessage(rawContent);
-  if (leaked) {
-    relayToSession(opts.sessionId, opts.cwd, leaked, opts.getConfig());
-    return {
-      reply: content || "Listo, se lo pasé a Claude.",
-      relayed: true,
-      relayedMessage: leaked,
-    };
-  }
-
-  return { reply: content, relayed: false };
+  return { reply, relayed: false };
 }
