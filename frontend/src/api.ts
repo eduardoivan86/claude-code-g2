@@ -158,6 +158,28 @@ export async function transcribeAudio(pcm: Uint8Array): Promise<string> {
   return body.text
 }
 
+// ── Text-to-speech (natural cloud voice) ─────────────────────────────────
+// POST the spoken text to the backend. If a cloud provider is configured the
+// response is `audio/mpeg` (mp3) → return the Blob to play. If no cloud
+// provider is configured the backend answers `{ browser: true }` (JSON) →
+// return null so the caller falls back to speechSynthesis. Any error also
+// returns null (graceful fall back to the browser voice).
+export async function ttsSynthesize(text: string): Promise<Blob | null> {
+  try {
+    const res = await authFetch('/api/native/tts', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) return null
+    const ct = (res.headers.get('Content-Type') ?? '').toLowerCase()
+    if (ct.includes('audio/mpeg')) return await res.blob()
+    // JSON `{ browser: true }` (or anything non-audio) → use the browser voice.
+    return null
+  } catch {
+    return null
+  }
+}
+
 // ── Native sessions bridge ───────────────────────────────────────────────
 // Reads the user's own ~/.claude/projects/*.jsonl transcripts via the backend
 // /api/native/* routes. Reuses authFetch (header bearer) for plain HTTP; the

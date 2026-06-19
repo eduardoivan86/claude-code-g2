@@ -18,6 +18,8 @@ import { emitAttention, onAttention } from '../native/bus'
 import { deliverToSession } from '../native/deliver'
 import { enqueue } from '../native/queue'
 import { runBrain } from '../native/brain'
+import { ttsConfigFromEnv } from '../native/ttsConfig.ts'
+import { synthesize } from '../native/tts.ts'
 
 // -----------------------------------------------------------------------------
 // "Native sessions" HTTP API.
@@ -280,6 +282,36 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
     } catch (err) {
       console.error('[native:brain] failed:', err)
       res.status(502).json({ error: 'brain_failed' })
+    }
+  })
+
+  // ----- text-to-speech (natural cloud voice with browser fallback) ----------
+  // Body `{ text }`. Resolves the TTS provider from env. When no cloud provider
+  // is configured (or its key is missing) → `{ browser: true }`, telling the
+  // frontend to use the free speechSynthesis voice. Otherwise returns mp3 bytes.
+  // On a synth error → 502 so the frontend can still fall back to the browser.
+  router.post('/tts', async (req: Request, res: Response) => {
+    const body = req.body as { text?: unknown }
+    const text = typeof body?.text === 'string' ? body.text.trim() : ''
+    if (!text) {
+      res.status(400).json({ error: 'text required' })
+      return
+    }
+    const cfg = ttsConfigFromEnv()
+    if (cfg.provider === 'browser') {
+      res.json({ browser: true })
+      return
+    }
+    try {
+      const buf = await synthesize(text, cfg)
+      if (!buf) {
+        res.json({ browser: true })
+        return
+      }
+      res.set('Content-Type', 'audio/mpeg').send(buf)
+    } catch (err) {
+      console.error('[native:tts] synth failed:', err)
+      res.status(502).json({ error: 'tts_failed' })
     }
   })
 
