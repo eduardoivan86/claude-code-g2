@@ -29,9 +29,11 @@ function timeAgo(ts: number): string {
   return `${Math.floor(sec / 86400)}d`
 }
 
-// Pad a label so the trailing time lands right-aligned within ~40 cols.
+// Pad a label so the trailing time lands right-aligned within the HUD width.
+// Widened alongside nativeMirror.FULL_COLS (44→52) to use more of the 576px
+// display; ~46 leaves a small safety margin under the ~52-col reading width.
 function rowWithTime(label: string, time: string): string {
-  const WIDTH = 38
+  const WIDTH = 46
   const t = time
   const room = WIDTH - t.length - 1
   const head = truncate(label, Math.max(1, room))
@@ -51,8 +53,8 @@ export const nativeSessionsScreen: GlassScreen<AppSnapshot, AppActions> = {
     const max = itemCount(snapshot) - 1
 
     const lines = [
-      line(`${truncate(project, 28)}  ${sessions.length} session${sessions.length === 1 ? '' : 's'}`, 'meta'),
-      line('━'.repeat(40), 'meta'),
+      line(`${truncate(project, 36)}  ${sessions.length} session${sessions.length === 1 ? '' : 's'}`, 'meta'),
+      line('━'.repeat(46), 'meta'),
     ]
 
     if (snapshot.nativeLoading && sessions.length === 0) {

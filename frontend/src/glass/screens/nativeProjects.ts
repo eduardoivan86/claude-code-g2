@@ -34,7 +34,7 @@ export const nativeProjectsScreen: GlassScreen<AppSnapshot, AppActions> = {
 
     const lines = [
       line(`NATIVE  ${projects.length} project${projects.length === 1 ? '' : 's'}`, 'meta'),
-      line('━'.repeat(40), 'meta'),
+      line('━'.repeat(46), 'meta'),
     ]
 
     if (snapshot.nativeLoading && projects.length === 0) {
@@ -53,7 +53,7 @@ export const nativeProjectsScreen: GlassScreen<AppSnapshot, AppActions> = {
 
     // Build display strings: "<project>  <sessionCount>" then the back row.
     const items: string[] = projects.map(
-      (p) => `${truncate(p.project, 34)}  ${p.sessionCount}`,
+      (p) => `${truncate(p.project, 42)}  ${p.sessionCount}`,
     )
     items.push(BACK_ITEM)
 

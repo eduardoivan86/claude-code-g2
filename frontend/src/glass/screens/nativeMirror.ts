@@ -11,7 +11,21 @@ import { line, separator } from '../theme'
 //   - tool_result user turns (isToolResult): skipped
 // Tap = record a voice follow-up. Transient status overlays the header.
 
-const FULL_COLS = 44
+// Reading-area width, in monospace-ish columns, for the 576px-wide G2 HUD.
+//
+// We want the widest line that still fits 576px at the firmware's display font.
+// even-toolkit advertises "pixel-accurate G2 text measurement" but, as of this
+// version, ships NO usable measurement API (no measureText/charWidth/font-metric
+// tables in dist — checked text-utils, paginate-text, glass-format, canvas-
+// renderer, layout). The toolkit's own paginate-text.wordWrap hardcodes 46 as
+// the "fits G2 display" default, and layout.DISPLAY_W confirms the 576px width.
+//
+// Lacking a real measurement util, we raise from the previous conservative 44 to
+// 52: the G2 LVGL display font typically fits ~50-56 monospace-ish cols at the
+// default size, and 52 leaves ~1 char of safety margin below that range while
+// reclaiming meaningful reading real estate. The exact max should be confirmed
+// on-device (or via the font-measurement skill) before pushing further.
+const FULL_COLS = 52
 const VISIBLE = 7
 
 function truncate(text: string, maxLen: number): string {
@@ -211,7 +225,7 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
 
     const lines = []
     // "Claude needs you" banner — prominent, top of screen, no sound. Sits
-    // above the normal header so it's the first thing the user sees. ≤44 cols.
+    // above the normal header so it's the first thing the user sees. ≤FULL_COLS.
     if (snapshot.nativeAttention) {
       lines.push(line('▶ CLAUDE TE ESPERA — tap'))
     }
@@ -234,7 +248,8 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
     // awaiting confirm. Always shown so the user's message is never lost.
     for (const p of shownPending) {
       const icon = p.queued ? '⏳ ' : '◐ '
-      lines.push(line(icon + truncate('> ' + p.text, 42), 'meta'))
+      // Reserve the 2-col icon prefix so the pinned line still fits FULL_COLS.
+      lines.push(line(icon + truncate('> ' + p.text, FULL_COLS - 2), 'meta'))
     }
     if (extraPending > 0) {
       lines.push(line(`+${extraPending} más`, 'meta'))
