@@ -35,6 +35,36 @@ test("parses assistant text + thinking + tool_use", () => {
   expect(t.toolUses).toEqual([{ name: "Edit", summary: "/a/b.ts" }]);
 });
 
+test("parses an AskUserQuestion tool_use into askQuestion", () => {
+  const line = JSON.stringify({ ...base, type: "assistant",
+    message: { role: "assistant", content: [
+      { type: "tool_use", id: "toolu_abc", name: "AskUserQuestion", input: {
+        questions: [
+          {
+            question: "Which database should I use?",
+            header: "Database",
+            multiSelect: false,
+            options: [
+              { label: "PostgreSQL", description: "Relational" },
+              { label: "MySQL" },
+              { label: "SQLite", description: "Embedded" },
+            ],
+          },
+        ],
+      } },
+    ] } });
+  const t = parseLine(line)!;
+  expect(t.askQuestion).toBeDefined();
+  expect(t.askQuestion!.toolUseId).toBe("toolu_abc");
+  const q = t.askQuestion!.questions[0]!;
+  expect(q.question).toBe("Which database should I use?");
+  expect(q.header).toBe("Database");
+  expect(q.multiSelect).toBe(false);
+  expect(q.options.map((o) => o.label)).toEqual(["PostgreSQL", "MySQL", "SQLite"]);
+  // The toolUses summary entry is still kept alongside.
+  expect(t.toolUses).toEqual([{ name: "AskUserQuestion", summary: "AskUserQuestion" }]);
+});
+
 test("ignores bookkeeping types", () => {
   for (const type of ["queue-operation", "attachment", "system", "last-prompt", "summary"]) {
     expect(parseLine(JSON.stringify({ ...base, type }))).toBeNull();

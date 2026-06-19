@@ -19,6 +19,7 @@ import {
   listNativeSessions,
   nativeMirrorUrl,
   newNativeSession,
+  sendNativeMessage,
   setHandoff,
   sendTurn,
   SseClient,
@@ -58,6 +59,65 @@ import { speak } from '../voice'
 function fallbackModeAfterRecording(): AppMode {
   return 'main'
 }
+
+// Detect an AskUserQuestion on a native mirror turn and drive the answering
+// screen. Phase 1: show questions[0] only; the chosen option label is relayed
+// to the mirrored session as a normal follow-up (lossy by design — not a true
+// tool_result, same as the managed path).
+//
+// Two paths:
+//  • assistant turn WITH askQuestion → show the picker (deduped per toolUseId).
+//  • any NEWER turn (different uuid, ≥ the question's timestamp) while a native
+//    question is showing → clear it (it was likely answered elsewhere / the
+//    conversation moved on).
+function handleNativeAskQuestion(turn: NativeTurn, sid: string): void {
+  const st = store.getState()
+  const aq = turn.askQuestion
+
+  if (aq && turn.role === 'assistant' && aq.questions.length > 0) {
+    // Dedup: already showing this exact question for this session.
+    if (
+      st.nativePendingQuestionSid === sid &&
+      st.pendingQuestion?.toolUseId === aq.toolUseId
+    ) {
+      return
+    }
+    const q = aq.questions[0]!
+    const text = q.multiSelect
+      ? `${q.question} (elegí una; multi por voz)`
+      : q.question
+    store.setNativePendingQuestionSid(sid)
+    store.setPendingQuestion({
+      toolUseId: aq.toolUseId,
+      text,
+      options: q.options.map((o) => o.label),
+    })
+    // Remember which turn raised the question so a strictly-newer turn clears it.
+    pendingQuestionTurnRef.uuid = turn.uuid
+    pendingQuestionTurnRef.ts = turn.timestamp
+    store.enterMode('answering')
+    return
+  }
+
+  // Clear-stale: a different, not-older turn arrived while a native question is
+  // still up → the question was likely answered elsewhere. Drop it and return to
+  // the mirror so the HUD reflects the live conversation.
+  if (
+    st.nativePendingQuestionSid === sid &&
+    st.pendingQuestion &&
+    turn.uuid !== pendingQuestionTurnRef.uuid &&
+    turn.timestamp >= pendingQuestionTurnRef.ts
+  ) {
+    store.setPendingQuestion(null)
+    store.setNativePendingQuestionSid(null)
+    if (store.getState().mode === 'answering') store.enterMode('native-mirror')
+  }
+}
+
+// Tracks the turn that raised the currently-shown native question, so a strictly
+// newer turn over the same mirror SSE can clear a stale picker. Module-level
+// (the handler is module-level too) — only one native question shows at a time.
+const pendingQuestionTurnRef = { uuid: '', ts: '' }
 
 const MODE_PATHS: Record<AppMode, string> = {
   unconfigured: '/g/main',
@@ -156,13 +216,28 @@ export function AppGlasses() {
           (tevt.kind === 'tool_use' && tevt.name === 'AskUserQuestion')
         ) {
           if (tevt.kind === 'tool_use') {
-            const inp = tevt.input as Record<string, unknown> | undefined
-            const questionText = typeof inp?.question === 'string' ? inp.question : String(inp?.question ?? 'Claude has a question')
-            const rawOpts = inp?.options
-            const options = Array.isArray(rawOpts) ? rawOpts.map(String) : []
+            // Real AskUserQuestion shape: { questions: [{ question, options:
+            // [{ label, description? }] }] }. Phase 1 shows questions[0]. The
+            // old flat { question, options:[string] } fields are kept as a
+            // fallback for any legacy / managed payloads still using them.
+            const inp = tevt.input as Record<string, any> | undefined
+            const q0 = Array.isArray(inp?.questions) ? inp!.questions[0] : undefined
+            const questionText =
+              (typeof q0?.question === 'string' ? q0.question : undefined) ??
+              (typeof inp?.question === 'string' ? inp.question : undefined) ??
+              'Claude has a question'
+            const rawOpts = Array.isArray(q0?.options) ? q0.options : inp?.options
+            const options = Array.isArray(rawOpts)
+              ? rawOpts.map((o: any) =>
+                  o && typeof o === 'object' && typeof o.label === 'string' ? o.label : String(o),
+                )
+              : []
+            // Managed question → no native sid.
+            store.setNativePendingQuestionSid(null)
             store.setPendingQuestion({ toolUseId: tevt.toolUseId, text: questionText, options })
             store.enterMode('answering')
           } else if (tevt.kind === 'question') {
+            store.setNativePendingQuestionSid(null)
             store.setPendingQuestion({ toolUseId: tevt.toolUseId, text: tevt.questionText, options: tevt.options })
             store.enterMode('answering')
           }
@@ -248,6 +323,7 @@ export function AppGlasses() {
             if (turn.role === 'user' && !turn.isToolResult && turn.text && turn.text.trim()) {
               store.removeNativePending(turn.text)
             }
+            handleNativeAskQuestion(turn, sid)
           }
         } catch (err) {
           console.warn('[native:mirror] parse error', err)
@@ -360,6 +436,7 @@ export function AppGlasses() {
     lastActivityAt: state.lastActivityAt,
     confirmTranscriptFlow: state.confirmTranscriptFlow,
     pendingQuestion: state.pendingQuestion,
+    nativePendingQuestionSid: state.nativePendingQuestionSid,
     scrollingTranscript: state.scrollingTranscript,
     sidebarVisible: state.sidebarVisible,
     nativeProjects: state.nativeProjects,
@@ -591,6 +668,28 @@ export function AppGlasses() {
     },
 
     async answerQuestion(answer: string) {
+      // Native question: relay the picked option label straight to the mirrored
+      // session via the direct native message endpoint (NOT the brain — it's a
+      // literal pick). Claude's response streams back over the mirror SSE.
+      const nativeSid = store.getState().nativePendingQuestionSid
+      if (nativeSid) {
+        store.setPendingQuestion(null)
+        store.setNativePendingQuestionSid(null)
+        // Pin the pick on the HUD until the SSE echoes the real user turn.
+        store.addNativePending(answer)
+        store.enterMode('native-mirror')
+        try {
+          await sendNativeMessage(nativeSid, answer)
+          store.markNativePendingSent(answer)
+        } catch (err) {
+          console.error('[glass] answerQuestion (native) failed:', err)
+          store.removeNativePending(answer)
+          store.setError('Answer failed')
+        }
+        return
+      }
+
+      // Managed question: relay via the managed turn endpoint.
       const sid = store.getState().activeSessionId
       store.setPendingQuestion(null)
       store.enterMode('main')
@@ -599,6 +698,30 @@ export function AppGlasses() {
         console.error('[glass] answerQuestion failed:', err)
         store.setError('Answer failed')
       }
+    },
+
+    cancelAnswer() {
+      const nativeSid = store.getState().nativePendingQuestionSid
+      store.setPendingQuestion(null)
+      store.setNativePendingQuestionSid(null)
+      // Native question → back to the mirror (Claude proceeds with its default).
+      // Managed → back to main, matching the prior cancelRecording() behavior.
+      store.enterMode(nativeSid ? 'native-mirror' : 'main')
+    },
+
+    voiceAnswer() {
+      const nativeSid = store.getState().nativePendingQuestionSid
+      if (nativeSid) {
+        // Native: clear the picker and record a native follow-up (the brain
+        // path), which lets multiSelect / freeform answers go through by voice.
+        store.setPendingQuestion(null)
+        store.setNativePendingQuestionSid(null)
+        store.enterMode('native-mirror')
+        void beginNativeFollowUp()
+        return
+      }
+      // Managed: reuse the existing managed turn recording.
+      actions.current.startTurnRecording()
     },
 
     // ── Native sessions bridge ────────────────────────────────────────────

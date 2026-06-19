@@ -52,6 +52,10 @@ export interface AppState {
   // Phase 3
   confirmTranscriptFlow: 'new' | 'turn' | null
   pendingQuestion: PendingQuestion | null
+  // When the pending question came from a NATIVE mirror session, this holds that
+  // session id so answerQuestion relays the picked option to it via the direct
+  // native message endpoint (not the managed sendTurn). null = managed question.
+  nativePendingQuestionSid: string | null
 
   scrollingTranscript: boolean
   sidebarVisible: boolean
@@ -164,6 +168,7 @@ const initialState: AppState = {
 
   confirmTranscriptFlow: null,
   pendingQuestion: null,
+  nativePendingQuestionSid: null,
   scrollingTranscript: false,
   sidebarVisible: false,
 
@@ -384,6 +389,9 @@ export const store = {
   setPendingQuestion(q: PendingQuestion | null): void {
     set({ pendingQuestion: q })
   },
+  setNativePendingQuestionSid(sid: string | null): void {
+    set({ nativePendingQuestionSid: sid })
+  },
 
   setScrollingTranscript(v: boolean): void {
     set({ scrollingTranscript: v })
@@ -540,6 +548,8 @@ export const store = {
       nativeMirrorStatus: null,
       nativePending: [],
       nativeBrainLog: [],
+      pendingQuestion: null,
+      nativePendingQuestionSid: null,
     })
   },
 }

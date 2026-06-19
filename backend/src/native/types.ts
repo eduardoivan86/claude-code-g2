@@ -10,6 +10,18 @@ export interface Turn {
   toolUses: { name: string; summary: string }[];
   isToolResult: boolean;        // user line that is a machine tool_result
   timestamp: string;
+  // Set on an assistant turn that contains an AskUserQuestion tool_use, so the
+  // glasses can show the multiple-choice picker and relay the chosen option back
+  // as a follow-up message. toolUseId is the tool_use block id.
+  askQuestion?: {
+    toolUseId: string;
+    questions: {
+      question: string;
+      header?: string;
+      multiSelect?: boolean;
+      options: { label: string; description?: string }[];
+    }[];
+  };
 }
 
 export interface SessionSummary {

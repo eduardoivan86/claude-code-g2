@@ -52,6 +52,8 @@ export interface AppSnapshot {
   lastActivityAt: number
   confirmTranscriptFlow: 'new' | 'turn' | null
   pendingQuestion: PendingQuestion | null
+  // Non-null when the pending question is from a native mirror session (its sid).
+  nativePendingQuestionSid: string | null
 
   scrollingTranscript: boolean
 
@@ -106,6 +108,12 @@ export interface AppActions {
   cancelTranscript(): void
 
   answerQuestion(answer: string): void
+  // Dismiss the pending question without answering. Routes back to the mirror for
+  // a native question (clearing its sid) or to main for a managed one.
+  cancelAnswer(): void
+  // Start a freeform voice answer for the pending question. For a native
+  // question this records a native follow-up; otherwise a managed turn.
+  voiceAnswer(): void
 
   // ── Native sessions bridge ──────────────────────────────────────────────
   openNativeProjects(): void                         // enter the native projects browser

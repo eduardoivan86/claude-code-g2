@@ -40,6 +40,17 @@ export interface NativeTurn {
   toolUses: { name: string; summary: string }[]
   isToolResult: boolean
   timestamp: string
+  // Present on an assistant turn carrying an AskUserQuestion tool_use. The
+  // glasses show the option picker and relay the chosen label as a follow-up.
+  askQuestion?: {
+    toolUseId: string
+    questions: {
+      question: string
+      header?: string
+      multiSelect?: boolean
+      options: { label: string; description?: string }[]
+    }[]
+  }
 }
 
 // One persisted brain-conversation exchange half. The backend writes a sidecar
