@@ -65,6 +65,7 @@ export interface AppSnapshot {
   nativeTurns: NativeTurn[]
   nativeMirrorStatus: NativeMirrorStatus
   nativeLoading: boolean
+  nativeAttention: boolean
 }
 
 export interface AppActions {
@@ -97,6 +98,7 @@ export interface AppActions {
   startNativeNewSession(): void                       // [+] voice → new native session
   scrollNativeMirror(delta: number): void
   recordNativeFollowUp(): void                        // tap in mirror → voice follow-up
+  clearNativeAttention(): void                        // dismiss the "Claude needs you" banner
   exitNative(): void                                  // back out to the main glasses UI
   nativeBack(): void                                  // mirror → sessions → projects → main
 }

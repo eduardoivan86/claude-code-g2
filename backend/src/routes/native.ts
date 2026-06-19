@@ -7,6 +7,7 @@ import { claudeProjectsDir, findSessionFile } from '../native/paths'
 import { listProjects, listSessions, readSessionMeta } from '../native/nativeSessions'
 import { tailSession } from '../native/tailer'
 import { isSessionIdle } from '../native/idleGuard'
+import { emitAttention, onAttention } from '../native/bus'
 
 // -----------------------------------------------------------------------------
 // "Native sessions" HTTP API.
@@ -65,7 +66,8 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
 
   // ----- mirror an existing session via SSE ----------------------------------
   router.get('/sessions/:sid/stream', (req: Request, res: Response) => {
-    const file = findSessionFile(String(req.params.sid), root)
+    const sid = String(req.params.sid)
+    const file = findSessionFile(sid, root)
     if (!file) {
       res.status(404).json({ error: 'not_found' })
       return
@@ -86,7 +88,20 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         /* connection gone; cleaned up by the close handler */
       }
     })
-    req.on('close', stop)
+    // Also forward "Claude needs you" attention events for this session. These
+    // ride the same SSE channel but are tagged `{ type: 'attention' }` so the
+    // HUD can tell them apart from NativeTurn frames.
+    const off = onAttention(sid, (p) => {
+      try {
+        res.write('data: ' + JSON.stringify({ type: 'attention', ...p }) + '\n\n')
+      } catch {
+        /* connection gone; cleaned up by the close handler */
+      }
+    })
+    req.on('close', () => {
+      stop()
+      off()
+    })
   })
 
   // ----- append a turn to an existing session (resume) -----------------------
@@ -122,7 +137,14 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         permissionMode: cfg.permissionMode,
         resume: true,
       },
-      (ev) => console.log('[native:resume]', sid.slice(0, 8), ev.kind),
+      (ev) => {
+        console.log('[native:resume]', sid.slice(0, 8), ev.kind)
+        // A `result` event means the turn completed → Claude is now waiting on
+        // the user. Surface a visual "needs you" alert on the HUD.
+        if (ev.kind === 'result') {
+          emitAttention(sid, { reason: 'turn_complete' })
+        }
+      },
     )
     proc.send(prompt)
     res.status(202).json({ ok: true })
@@ -148,7 +170,12 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         permissionMode: cfg.permissionMode,
         resume: false,
       },
-      (ev) => console.log('[native:new]', sid.slice(0, 8), ev.kind),
+      (ev) => {
+        console.log('[native:new]', sid.slice(0, 8), ev.kind)
+        if (ev.kind === 'result') {
+          emitAttention(sid, { reason: 'turn_complete' })
+        }
+      },
     )
     proc.send(prompt)
     res.json({ sessionId: sid })

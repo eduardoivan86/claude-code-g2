@@ -114,15 +114,23 @@ function statusLabel(snapshot: AppSnapshot): string | null {
 
 export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
   display(snapshot) {
+    // The banner consumes one body row; shrink the transcript window by one so
+    // the total stays at 10 lines and the footer hint is never clipped.
+    const visibleCount = snapshot.nativeAttention ? VISIBLE - 1 : VISIBLE
     const allLines = turnsToLines(snapshot.nativeTurns)
     const totalLines = allLines.length
-    const maxOffset = Math.max(0, totalLines - VISIBLE)
+    const maxOffset = Math.max(0, totalLines - visibleCount)
     const offset = Math.min(snapshot.sessionScrollOffset, maxOffset)
-    const startLine = Math.max(0, totalLines - VISIBLE - offset)
-    const visible = allLines.slice(startLine, startLine + VISIBLE)
-    const bar = scrollBar(totalLines, VISIBLE, offset)
+    const startLine = Math.max(0, totalLines - visibleCount - offset)
+    const visible = allLines.slice(startLine, startLine + visibleCount)
+    const bar = scrollBar(totalLines, visibleCount, offset)
 
     const lines = []
+    // "Claude needs you" banner — prominent, top of screen, no sound. Sits
+    // above the normal header so it's the first thing the user sees. ≤44 cols.
+    if (snapshot.nativeAttention) {
+      lines.push(line('▶ CLAUDE TE ESPERA — tap'))
+    }
     const status = statusLabel(snapshot)
     if (status) {
       lines.push(line(status))
@@ -167,7 +175,11 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
     }
     if (action.type === 'SELECT_HIGHLIGHTED') {
       // Don't start a new recording while a follow-up is mid-flight.
-      if (!snapshot.nativeMirrorStatus) ctx.recordNativeFollowUp()
+      if (!snapshot.nativeMirrorStatus) {
+        // Tapping to answer also dismisses the "Claude needs you" banner.
+        ctx.clearNativeAttention()
+        ctx.recordNativeFollowUp()
+      }
       return nav
     }
     if (action.type === 'GO_BACK') {

@@ -25,6 +25,33 @@ import {
 import type { AppMode, NativeTurn, SseEvent } from '../types'
 import { startCapture, stopCapture } from '../audio'
 
+// TODO(background-state): persist the native mirror so the "Claude needs you"
+// banner keeps working when the phone app is backgrounded. The Even Hub runs
+// the plugin in a headless WebView that keeps pushing frames to the glasses,
+// but on a foreground/background round-trip in-memory store state can be lost.
+// The intended wiring (NOT added — see below) is, at module init:
+//
+//   setBackgroundState('nativeMirror', () => ({
+//     nativeMirrorSid:     store.getState().nativeMirrorSid,
+//     nativeMirrorCwd:     store.getState().nativeMirrorCwd,
+//     nativeTurns:         store.getState().nativeTurns,
+//     sessionScrollOffset: store.getState().sessionScrollOffset,
+//     nativeAttention:     store.getState().nativeAttention,
+//     mode:                store.getState().mode,
+//   }))
+//   onBackgroundRestore('nativeMirror', (saved) => {
+//     // re-open the mirror (re-fires the EventSource effect on the restored sid)
+//     // then reapply turns / scroll / attention / mode via the store setters,
+//     // with nullish fallbacks.
+//   })
+//
+// BLOCKED: the installed `@evenrealities/even_hub_sdk` (v0.0.9) does NOT export
+// setBackgroundState / onBackgroundRestore, and even-toolkit (v1.5.0) does not
+// re-export them either. Per the implementation brief we do NOT invent an
+// import. The foreground notification path (attention bus → SSE → banner) works
+// fully regardless. Wire this up once a background-state API is available in the
+// fork's SDK (or use the everything-evenhub `background-state` skill).
+
 function fallbackModeAfterRecording(): AppMode {
   return 'main'
 }
@@ -173,8 +200,15 @@ export function AppGlasses() {
       next.onmessage = (msg) => {
         gotData = true
         try {
-          const turn = JSON.parse(msg.data) as NativeTurn
-          store.pushNativeTurn(turn)
+          const parsed = JSON.parse(msg.data) as NativeTurn | { type: 'attention'; reason?: string }
+          // Attention frames (tagged `{ type: 'attention' }`) ride the same SSE
+          // channel as NativeTurn frames. They fire when Claude finishes a turn
+          // and is now waiting on the user → raise the visual HUD banner.
+          if ((parsed as { type?: string }).type === 'attention') {
+            store.setNativeAttention(true)
+          } else {
+            store.pushNativeTurn(parsed as NativeTurn)
+          }
         } catch (err) {
           console.warn('[native:mirror] parse error', err)
         }
@@ -239,6 +273,7 @@ export function AppGlasses() {
     nativeTurns: state.nativeTurns,
     nativeMirrorStatus: state.nativeMirrorStatus,
     nativeLoading: state.nativeLoading,
+    nativeAttention: state.nativeAttention,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -500,6 +535,9 @@ export function AppGlasses() {
     },
     recordNativeFollowUp() {
       void beginNativeFollowUp()
+    },
+    clearNativeAttention() {
+      store.setNativeAttention(false)
     },
     exitNative() {
       store.clearNativeMirror()

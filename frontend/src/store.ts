@@ -65,6 +65,10 @@ export interface AppState {
   nativeTurns: NativeTurn[]
   nativeMirrorStatus: NativeMirrorStatus
   nativeLoading: boolean
+  // "Claude needs you": set when a native turn completes (result event) and
+  // Claude is now waiting on the user. Drives a prominent HUD banner; cleared
+  // when the user taps to answer or re-opens the mirror.
+  nativeAttention: boolean
 }
 
 const initialState: AppState = {
@@ -109,6 +113,7 @@ const initialState: AppState = {
   nativeTurns: [],
   nativeMirrorStatus: null,
   nativeLoading: false,
+  nativeAttention: false,
 }
 
 let state: AppState = initialState
@@ -333,9 +338,15 @@ export const store = {
       nativeMirrorCwd: cwd,
       nativeTurns: [],
       nativeMirrorStatus: null,
+      nativeAttention: false,
       sessionScrollOffset: 0,
       lastActivityAt: Date.now(),
     })
+  },
+  // Toggle the "Claude needs you" banner. Set true when an attention frame
+  // arrives over the mirror SSE; cleared when the user taps to answer.
+  setNativeAttention(v: boolean): void {
+    set({ nativeAttention: v })
   },
   // Append/replace a turn from the mirror SSE. tailSession replays existing
   // turns then streams new ones; turns are keyed by uuid so replays of the
