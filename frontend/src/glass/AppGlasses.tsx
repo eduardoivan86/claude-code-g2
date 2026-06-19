@@ -240,7 +240,13 @@ export function AppGlasses() {
           if ((parsed as { type?: string }).type === 'attention') {
             store.setNativeAttention(true)
           } else {
-            store.pushNativeTurn(parsed as NativeTurn)
+            const turn = parsed as NativeTurn
+            store.pushNativeTurn(turn)
+            // The real user turn landed over SSE → drop its pending pin (it now
+            // shows as a normal turn in the transcript). Match on trimmed text.
+            if (turn.role === 'user' && !turn.isToolResult && turn.text && turn.text.trim()) {
+              store.removeNativePending(turn.text)
+            }
           }
         } catch (err) {
           console.warn('[native:mirror] parse error', err)
@@ -279,6 +285,54 @@ export function AppGlasses() {
     return () => clearInterval(iv)
   }, [state.mode])
 
+  // Retry driver for queued voice follow-ups. When a follow-up hits a busy
+  // session (409), its pending entry stays `queued:true`. While any such entry
+  // exists and a mirror is open, run one ~4s interval that re-attempts delivery
+  // of the OLDEST queued entry (one at a time, oldest-first). On success it
+  // flips to `queued:false` (awaiting the SSE echo, which then drops it). The
+  // in-flight ref guards against overlapping sends so a slow request can't be
+  // double-fired by the next tick. The interval tears down once nothing is
+  // queued or the mirror closes — no busy-spin while idle/backgrounded.
+  const retryInFlightRef = useRef(false)
+  const retryFailuresRef = useRef(0)
+  const hasQueuedPending = state.nativePending.some((e) => e.queued)
+  useEffect(() => {
+    const sid = state.nativeMirrorSid
+    if (!sid || !hasQueuedPending) return
+    const RETRY_MS = 4000
+    const MAX_NONBUSY_FAILURES = 20
+    const tick = async () => {
+      if (retryInFlightRef.current) return
+      // Always re-read live state — the entry/sid may have changed since mount.
+      const cur = store.getState()
+      if (cur.nativeMirrorSid !== sid) return
+      const entry = cur.nativePending.find((e) => e.queued)
+      if (!entry) return
+      retryInFlightRef.current = true
+      try {
+        await sendNativeMessage(sid, entry.text)
+        store.markNativePendingSent(entry.text)
+        retryFailuresRef.current = 0
+      } catch (err) {
+        if (err instanceof SessionBusyError) {
+          // Still busy — leave queued, try again next tick.
+          retryFailuresRef.current = 0
+        } else {
+          retryFailuresRef.current += 1
+          console.warn('[glass] pending retry failed:', err)
+          if (retryFailuresRef.current >= MAX_NONBUSY_FAILURES) {
+            store.setError('No se pudo enviar')
+            retryFailuresRef.current = 0
+          }
+        }
+      } finally {
+        retryInFlightRef.current = false
+      }
+    }
+    const iv = setInterval(() => void tick(), RETRY_MS)
+    return () => clearInterval(iv)
+  }, [state.nativeMirrorSid, hasQueuedPending])
+
   const snapshot: AppSnapshot = {
     mode: state.mode,
     sessions: state.sessions,
@@ -307,6 +361,7 @@ export function AppGlasses() {
     nativeMirrorStatus: state.nativeMirrorStatus,
     nativeLoading: state.nativeLoading,
     nativeAttention: state.nativeAttention,
+    nativePending: state.nativePending,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -599,6 +654,20 @@ export function AppGlasses() {
         store.enterMode('main')
       }
     },
+
+    // ── Pending voice follow-ups (busy-session queue) ─────────────────────
+    addNativePending(text: string) {
+      store.addNativePending(text)
+    },
+    markNativePendingSent(text: string) {
+      store.markNativePendingSent(text)
+    },
+    removeNativePending(text: string) {
+      store.removeNativePending(text)
+    },
+    clearNativePending() {
+      store.clearNativePending()
+    },
   })
 
   // Native voice flows reuse the existing recording UI (recording-turn mode +
@@ -649,17 +718,11 @@ export function AppGlasses() {
         void setHandoff(sid).catch((err) =>
           console.warn('[glass] setHandoff (new) failed:', err),
         )
-        // Optimistic echo: show the user's prompt on the HUD immediately
-        // (deduped when the real turn arrives over SSE).
-        store.pushNativeTurn({
-          uuid: `optimistic-${Date.now()}`,
-          sessionId: sid,
-          role: 'user',
-          text,
-          toolUses: [],
-          isToolResult: false,
-          timestamp: new Date().toISOString(),
-        })
+        // Pin the prompt on the HUD as sent (new sessions aren't busy, so it's
+        // already accepted) — it clears when the SSE echoes the real turn.
+        // openNativeMirror just reset nativePending, so add it after.
+        store.addNativePending(text)
+        store.markNativePendingSent(text)
         // The mirror effect opens the stream (with retry while the .jsonl
         // is created). Show "connecting" until the first turn arrives.
         store.setNativeMirrorStatus('connecting')
@@ -672,22 +735,19 @@ export function AppGlasses() {
       } else {
         store.setNativeMirrorStatus('sending')
         store.enterMode('native-mirror')
-        // Optimistic echo: render the prompt on the HUD now; the real user
-        // turn from SSE replaces it (deduped by role + text in pushNativeTurn).
-        store.pushNativeTurn({
-          uuid: `optimistic-${Date.now()}`,
-          sessionId: flow.sid,
-          role: 'user',
-          text,
-          toolUses: [],
-          isToolResult: false,
-          timestamp: new Date().toISOString(),
-        })
+        // Pin the prompt on the HUD immediately as queued. It stays visible
+        // (dim) and is never lost: if the session is busy the retry driver keeps
+        // trying until Claude frees up; the SSE echo then clears it.
+        store.addNativePending(text)
         try {
           await sendNativeMessage(flow.sid, text)
+          // Accepted (200) → awaiting SSE echo.
+          store.markNativePendingSent(text)
           store.setNativeMirrorStatus(null)
         } catch (err) {
           if (err instanceof SessionBusyError) {
+            // Leave the entry queued:true — the retry effect delivers it once
+            // Claude is free. Brief 'busy' status; the pin is the durable signal.
             store.setNativeMirrorStatus('busy')
             setTimeout(() => {
               if (store.getState().nativeMirrorStatus === 'busy') {

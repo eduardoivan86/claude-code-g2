@@ -66,6 +66,9 @@ export interface AppSnapshot {
   nativeMirrorStatus: NativeMirrorStatus
   nativeLoading: boolean
   nativeAttention: boolean
+  // Pending voice follow-ups pinned on the HUD (queued = waiting for Claude,
+  // !queued = sent, awaiting SSE confirm).
+  nativePending: { text: string; queued: boolean }[]
 }
 
 export interface AppActions {
@@ -101,4 +104,10 @@ export interface AppActions {
   clearNativeAttention(): void                        // dismiss the "Claude needs you" banner
   exitNative(): void                                  // back out to the main glasses UI
   nativeBack(): void                                  // mirror → sessions → projects → main
+
+  // ── Pending voice follow-ups (busy-session queue) ───────────────────────
+  addNativePending(text: string): void               // pin a message as queued
+  markNativePendingSent(text: string): void          // queued → sent (awaiting SSE)
+  removeNativePending(text: string): void            // SSE echoed the real turn → drop
+  clearNativePending(): void
 }

@@ -114,9 +114,23 @@ function statusLabel(snapshot: AppSnapshot): string | null {
 
 export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
   display(snapshot) {
-    // The banner consumes one body row; shrink the transcript window by one so
-    // the total stays at 10 lines and the footer hint is never clipped.
-    const visibleCount = snapshot.nativeAttention ? VISIBLE - 1 : VISIBLE
+    // Pinned pending follow-ups (dim, always visible) sit just under the header,
+    // before the transcript window. Cap at the 2 most recent so they don't eat
+    // the HUD; surface "+N más" when there are more.
+    const pending = snapshot.nativePending ?? []
+    const PIN_CAP = 2
+    const shownPending = pending.slice(-PIN_CAP)
+    const extraPending = pending.length - shownPending.length
+    // Each shown pending entry is one pinned line; "+N más" is one more.
+    const pinnedLineCount = shownPending.length + (extraPending > 0 ? 1 : 0)
+
+    // The attention banner consumes one body row; pinned pending lines consume
+    // one each. Shrink the transcript window so the total stays at 10 lines and
+    // the footer hint is never clipped.
+    const visibleCount = Math.max(
+      1,
+      VISIBLE - (snapshot.nativeAttention ? 1 : 0) - pinnedLineCount,
+    )
     const allLines = turnsToLines(snapshot.nativeTurns)
     const totalLines = allLines.length
     const maxOffset = Math.max(0, totalLines - visibleCount)
@@ -141,6 +155,16 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
       lines.push(line(`◆ ${truncate(sid.slice(0, 8), 16)} ${bar}`))
     }
     lines.push(separator())
+
+    // Pinned pending entries (dim): ⏳ = waiting for Claude (queued), ◐ = sent,
+    // awaiting confirm. Always shown so the user's message is never lost.
+    for (const p of shownPending) {
+      const icon = p.queued ? '⏳ ' : '◐ '
+      lines.push(line(icon + truncate('> ' + p.text, 42), 'meta'))
+    }
+    if (extraPending > 0) {
+      lines.push(line(`+${extraPending} más`, 'meta'))
+    }
 
     if (totalLines === 0 && !status) {
       lines.push(line('waiting for transcript…', 'meta'))

@@ -69,6 +69,11 @@ export interface AppState {
   // Claude is now waiting on the user. Drives a prominent HUD banner; cleared
   // when the user taps to answer or re-opens the mirror.
   nativeAttention: boolean
+  // Pending voice follow-ups awaiting delivery to Claude. `queued:true` = got a
+  // 409 (session busy), retrying until Claude frees up; `queued:false` = accepted
+  // (200), waiting for the mirror SSE to echo the real user turn. Either way the
+  // text stays pinned on the HUD (dim) so the user never loses their message.
+  nativePending: { text: string; queued: boolean }[]
 }
 
 const initialState: AppState = {
@@ -114,6 +119,7 @@ const initialState: AppState = {
   nativeMirrorStatus: null,
   nativeLoading: false,
   nativeAttention: false,
+  nativePending: [],
 }
 
 let state: AppState = initialState
@@ -339,6 +345,7 @@ export const store = {
       nativeTurns: [],
       nativeMirrorStatus: null,
       nativeAttention: false,
+      nativePending: [],
       sessionScrollOffset: 0,
       lastActivityAt: Date.now(),
     })
@@ -352,23 +359,54 @@ export const store = {
   // turns then streams new ones; turns are keyed by uuid so replays of the
   // same turn (e.g. assistant text growing) overwrite rather than duplicate.
   pushNativeTurn(turn: NativeTurn): void {
-    // When a REAL turn arrives over SSE, drop any optimistic echo we rendered
-    // for it (same role + text) so the user's follow-up isn't shown twice.
-    const base = turn.uuid.startsWith('optimistic-')
-      ? state.nativeTurns
-      : state.nativeTurns.filter(
-          (t) =>
-            !(t.uuid.startsWith('optimistic-') && t.role === turn.role && t.text.trim() === turn.text.trim()),
-        )
-    const idx = base.findIndex((t) => t.uuid === turn.uuid)
+    const idx = state.nativeTurns.findIndex((t) => t.uuid === turn.uuid)
     let next: NativeTurn[]
     if (idx >= 0) {
-      next = [...base]
+      next = [...state.nativeTurns]
       next[idx] = turn
     } else {
-      next = [...base, turn]
+      next = [...state.nativeTurns, turn]
     }
     set({ nativeTurns: next, lastActivityAt: Date.now() })
+  },
+  // ── Pending voice follow-ups (busy-session queue) ─────────────────────────
+  // Push a new pending entry as queued (waiting for Claude to free up). Dedupes
+  // an exact-duplicate consecutive text (e.g. a double-tap re-send).
+  addNativePending(text: string): void {
+    const t = text.trim()
+    if (!t) return
+    const last = state.nativePending[state.nativePending.length - 1]
+    if (last && last.text.trim() === t) return
+    set({
+      nativePending: [...state.nativePending, { text, queued: true }],
+      lastActivityAt: Date.now(),
+    })
+  },
+  // Mark the matching entry as accepted (200) — now awaiting the SSE echo.
+  markNativePendingSent(text: string): void {
+    const t = text.trim()
+    let changed = false
+    const next = state.nativePending.map((e) => {
+      if (!changed && e.queued && e.text.trim() === t) {
+        changed = true
+        return { ...e, queued: false }
+      }
+      return e
+    })
+    if (changed) set({ nativePending: next })
+  },
+  // Drop the entry whose text matches (the real turn landed over SSE).
+  removeNativePending(text: string): void {
+    const t = text.trim()
+    const idx = state.nativePending.findIndex((e) => e.text.trim() === t)
+    if (idx < 0) return
+    const next = [...state.nativePending]
+    next.splice(idx, 1)
+    set({ nativePending: next })
+  },
+  clearNativePending(): void {
+    if (state.nativePending.length === 0) return
+    set({ nativePending: [] })
   },
   setNativeMirrorStatus(status: NativeMirrorStatus): void {
     set({ nativeMirrorStatus: status })
@@ -379,6 +417,7 @@ export const store = {
       nativeMirrorCwd: null,
       nativeTurns: [],
       nativeMirrorStatus: null,
+      nativePending: [],
     })
   },
 }
