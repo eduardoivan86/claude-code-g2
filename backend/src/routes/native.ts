@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { Router, type Request, type Response } from 'express'
-import type { RuntimeConfig } from '../config.ts'
+import type { RuntimeConfig, VoiceSettings, EffortLevel } from '../config.ts'
 import { ClaudeCodeProc } from '../sessions/claudeProc.ts'
 import { claudeProjectsDir, findSessionFile } from '../native/paths'
 import { listProjects, listSessions, readSessionMeta, readRecentTurns } from '../native/nativeSessions'
@@ -47,6 +47,10 @@ export interface NativeConfig {
   claudeBinary: string
   model: RuntimeConfig['model']
   permissionMode: RuntimeConfig['permissionMode']
+  voice?: VoiceSettings
+  brainModel?: string
+  effort?: EffortLevel
+  ultracode?: boolean
 }
 
 export interface NativeRouterDeps {
@@ -324,7 +328,7 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
       res.status(400).json({ error: 'text required' })
       return
     }
-    const cfg = ttsConfigFromEnv()
+    const cfg = ttsConfigFromEnv(process.env, deps.getConfig().voice)
     if (cfg.provider === 'browser') {
       res.json({ browser: true })
       return
@@ -360,6 +364,8 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         claudeBinary: cfg.claudeBinary,
         model: body.model ?? cfg.model,
         permissionMode: cfg.permissionMode,
+        effort: cfg.effort,
+        ...(cfg.ultracode ? { settings: JSON.stringify({ ultracode: true }) } : {}),
         resume: false,
       },
       (ev) => {

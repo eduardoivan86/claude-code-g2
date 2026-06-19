@@ -90,12 +90,29 @@ authed.get('/config', (_req, res) => {
 })
 
 // -------- settings (read + write) --------------------------------------------
+// The voice block is ALWAYS masked: raw API keys are never returned. Instead we
+// expose boolean *KeySet flags so the UI can show "key configured" without ever
+// receiving the secret. Keep this shape in sync with the frontend settings form.
+function maskedVoice() {
+  return {
+    ttsProvider: cfg.voice?.ttsProvider ?? 'browser',
+    elevenlabsVoiceId: cfg.voice?.elevenlabsVoiceId ?? '',
+    openaiVoice: cfg.voice?.openaiVoice ?? '',
+    brainModel: cfg.voice?.brainModel ?? '',
+    elevenlabsKeySet: !!cfg.voice?.elevenlabsApiKey,
+    openaiKeySet: !!cfg.voice?.openaiApiKey,
+  }
+}
+
 authed.get('/settings', (_req, res) => {
   res.json({
     permissionMode: cfg.permissionMode,
     model: cfg.model,
     defaultProjectName: cfg.defaultProjectName,
     projects: cfg.projects.map((p) => ({ name: p.name })),
+    effort: cfg.effort,
+    ultracode: !!cfg.ultracode,
+    voice: maskedVoice(),
   })
 })
 
@@ -109,6 +126,9 @@ authed.post('/settings', (req, res) => {
       permissionMode: cfg.permissionMode,
       model: cfg.model,
       defaultProjectName: cfg.defaultProjectName,
+      effort: cfg.effort,
+      ultracode: !!cfg.ultracode,
+      voice: maskedVoice(),
     })
   } catch (err) {
     console.error('[settings] save failed:', err)

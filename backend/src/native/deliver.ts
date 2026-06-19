@@ -2,7 +2,7 @@ import { basename } from 'node:path'
 import { ClaudeCodeProc } from '../sessions/claudeProc.ts'
 import { emitAttention } from './bus'
 import { notifyTelegram } from './telegram'
-import type { RuntimeConfig } from '../config.ts'
+import type { RuntimeConfig, VoiceSettings, EffortLevel } from '../config.ts'
 
 // -----------------------------------------------------------------------------
 // deliverToSession — the single place that spawns a resumed `claude` CLI run for
@@ -21,6 +21,9 @@ export interface DeliverConfig {
   claudeBinary: string
   model: RuntimeConfig['model']
   permissionMode: RuntimeConfig['permissionMode']
+  voice?: VoiceSettings
+  effort?: EffortLevel
+  ultracode?: boolean
 }
 
 export function deliverToSession(
@@ -36,6 +39,8 @@ export function deliverToSession(
       claudeBinary: cfg.claudeBinary,
       model: cfg.model,
       permissionMode: cfg.permissionMode,
+      effort: cfg.effort,
+      ...(cfg.ultracode ? { settings: JSON.stringify({ ultracode: true }) } : {}),
       resume: true,
     },
     (ev) => {

@@ -305,8 +305,13 @@ export function AppGlasses() {
   useEffect(() => {
     const was = prevAttentionRef.current
     prevAttentionRef.current = state.nativeAttention
-    if (state.nativeAttention && !was && state.voiceEnabled) {
-      speak('Claude terminó, te espera.')
+    if (state.nativeAttention && !was) {
+      // A new notification auto-unhides the HUD (if it was 3-tap hidden) so the
+      // user never misses Claude waiting on them.
+      store.setHudHidden(false)
+      if (state.voiceEnabled) {
+        speak('Claude terminó, te espera.')
+      }
     }
   }, [state.nativeAttention, state.voiceEnabled])
 
@@ -365,6 +370,7 @@ export function AppGlasses() {
     nativeMirrorStatus: state.nativeMirrorStatus,
     nativeLoading: state.nativeLoading,
     nativeAttention: state.nativeAttention,
+    hudHidden: state.hudHidden,
     nativePending: state.nativePending,
     voiceEnabled: state.voiceEnabled,
     scrollInverted: state.scrollInverted,
@@ -687,6 +693,9 @@ export function AppGlasses() {
     setNativeBrainReply(v: string | null) {
       store.setNativeBrainReply(v)
     },
+    setHudHidden(v: boolean) {
+      store.setHudHidden(v)
+    },
   })
 
   // Native voice flows reuse the existing recording UI (recording-turn mode +
@@ -793,12 +802,52 @@ export function AppGlasses() {
     return true
   }
 
+  // 3-tap HUD hide tap counter. Every GlassAction passes through this single
+  // choke point before reaching the per-screen handler, so we can count quick
+  // SELECT_HIGHLIGHTED taps here without touching any screen.
+  const tapHide = useRef<{ count: number; firstTs: number }>({ count: 0, firstTs: 0 })
+  const TAP_HIDE_WINDOW_MS = 900
+  const TAP_HIDE_COUNT = 3
+
   const handleGlassAction = useCallback(
     (
       action: Parameters<typeof onGlassAction>[0],
       nav: Parameters<typeof onGlassAction>[1],
       snap: AppSnapshot,
-    ) => onGlassAction(action, nav, snap, actions.current),
+    ) => {
+      // ── Manual restore: while hidden, a double-tap (GO_BACK) unhides and is
+      // swallowed so it doesn't also navigate back. Checked before normal
+      // handling so a hidden HUD intercepts the gesture.
+      if (store.getState().hudHidden && action.type === 'GO_BACK') {
+        store.setHudHidden(false)
+        return nav
+      }
+
+      // ── 3-tap hide: count quick consecutive taps (SELECT_HIGHLIGHTED).
+      if (action.type === 'SELECT_HIGHLIGHTED') {
+        const now = Date.now()
+        const t = tapHide.current
+        if (now - t.firstTs <= TAP_HIDE_WINDOW_MS) {
+          t.count += 1
+        } else {
+          t.count = 1
+          t.firstTs = now
+        }
+        if (t.count >= TAP_HIDE_COUNT) {
+          store.setHudHidden(true)
+          t.count = 0
+          t.firstTs = 0
+          // Swallow the tap burst so it doesn't also trigger record/select.
+          return nav
+        }
+      } else {
+        // Any non-SELECT_HIGHLIGHTED action breaks the tap streak.
+        tapHide.current.count = 0
+        tapHide.current.firstTs = 0
+      }
+
+      return onGlassAction(action, nav, snap, actions.current)
+    },
     [],
   )
 

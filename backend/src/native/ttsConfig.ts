@@ -8,6 +8,8 @@
 // This module is PURE and unit-testable: it derives everything from the passed
 // `env` map (default `process.env`), so the resolver has no I/O side effects.
 
+import type { VoiceSettings } from '../config.ts'
+
 export type TtsProvider = 'browser' | 'elevenlabs' | 'openai'
 
 export interface TtsConfig {
@@ -42,32 +44,40 @@ type Env = Record<string, string | undefined>
  *                OPENAI_TTS_VOICE || nova
  *
  * An unknown `TTS_PROVIDER` value falls back to `browser`.
+ *
+ * The optional `voice` param holds the persisted app settings (from
+ * config.json). When present, its fields take precedence over the matching env
+ * vars, so the user can configure TTS entirely from the app. Env stays as the
+ * fallback. The graceful "no key → browser" behavior is preserved regardless of
+ * source.
  */
-export function ttsConfigFromEnv(env: Env = process.env): TtsConfig {
-  const raw = (env.TTS_PROVIDER ?? 'browser').trim().toLowerCase()
+export function ttsConfigFromEnv(env: Env = process.env, voice?: VoiceSettings): TtsConfig {
+  const rawSource = voice?.ttsProvider ?? env.TTS_PROVIDER ?? 'browser'
+  const raw = rawSource.trim().toLowerCase()
 
-  // Defaults shared across the union so the shape is always complete.
-  const voiceId = env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'
+  // Defaults shared across the union so the shape is always complete. Voice
+  // settings win over env; env wins over the hard-coded default.
+  const voiceId = voice?.elevenlabsVoiceId || env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'
   const modelId = env.ELEVENLABS_MODEL || 'eleven_flash_v2_5'
   const model = env.OPENAI_TTS_MODEL || 'tts-1'
-  const voice = env.OPENAI_TTS_VOICE || 'nova'
+  const voiceName = voice?.openaiVoice || env.OPENAI_TTS_VOICE || 'nova'
 
   if (raw === 'elevenlabs') {
-    const apiKey = env.ELEVENLABS_API_KEY || ''
+    const apiKey = voice?.elevenlabsApiKey || env.ELEVENLABS_API_KEY || ''
     // No key → graceful fallback to the free browser voice.
     if (!apiKey) {
-      return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice }
+      return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice: voiceName }
     }
-    return { provider: 'elevenlabs', apiKey, voiceId, modelId, model, voice }
+    return { provider: 'elevenlabs', apiKey, voiceId, modelId, model, voice: voiceName }
   }
 
   if (raw === 'openai') {
-    const apiKey = env.OPENAI_API_KEY || ''
+    const apiKey = voice?.openaiApiKey || env.OPENAI_API_KEY || ''
     if (!apiKey) {
-      return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice }
+      return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice: voiceName }
     }
-    return { provider: 'openai', apiKey, voiceId, modelId, model, voice }
+    return { provider: 'openai', apiKey, voiceId, modelId, model, voice: voiceName }
   }
 
-  return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice }
+  return { provider: 'browser', apiKey: '', voiceId, modelId, model, voice: voiceName }
 }

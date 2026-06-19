@@ -81,11 +81,43 @@ export async function getConfig(): Promise<BackendConfig> {
 
 export type PermissionMode = 'bypassPermissions' | 'acceptEdits' | 'default'
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export interface VoiceSettings {
+  ttsProvider: 'browser' | 'elevenlabs' | 'openai'
+  elevenlabsVoiceId: string
+  openaiVoice: string
+  brainModel: string
+  elevenlabsKeySet: boolean
+  openaiKeySet: boolean
+}
+
+// What the client may POST back. Keys are write-only (never returned by GET):
+// send a non-empty key to set it, or clear*Key:true to remove it. Omit to keep.
+export interface VoiceSettingsUpdate {
+  ttsProvider?: 'browser' | 'elevenlabs' | 'openai'
+  elevenlabsApiKey?: string
+  elevenlabsVoiceId?: string
+  openaiApiKey?: string
+  openaiVoice?: string
+  brainModel?: string
+  clearElevenlabsKey?: boolean
+  clearOpenaiKey?: boolean
+}
+
 export interface Settings {
   permissionMode: PermissionMode
   model: string
+  effort: EffortLevel
+  ultracode: boolean
+  voice: VoiceSettings
   defaultProjectName: string
   projects: { name: string }[]
+}
+
+// The POST body mirrors Settings but `voice` carries the write-only update shape.
+export type SettingsUpdate = Partial<Omit<Settings, 'voice' | 'projects'>> & {
+  voice?: VoiceSettingsUpdate
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -94,7 +126,7 @@ export async function getSettings(): Promise<Settings> {
   return res.json()
 }
 
-export async function saveSettings(update: Partial<Settings>): Promise<Settings> {
+export async function saveSettings(update: SettingsUpdate): Promise<Settings> {
   const res = await authFetch('/api/settings', {
     method: 'POST',
     body: JSON.stringify(update),

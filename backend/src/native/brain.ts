@@ -152,7 +152,11 @@ export async function runBrain(opts: RunBrainOpts): Promise<RunBrainResult> {
     apiKey: env.GROQ_API_KEY || "none",
     baseURL: env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
   });
-  const model = env.GROQ_BRAIN_MODEL || "llama-3.3-70b-versatile";
+  // Prefer the app-configured brain model (config.json) over the env fallback.
+  const model =
+    opts.getConfig().voice?.brainModel ||
+    env.GROQ_BRAIN_MODEL ||
+    "llama-3.3-70b-versatile";
 
   // SYSTEM + last ~20 recent turns (each truncated) + the final user text.
   const messages: ChatCompletionMessageParam[] = [

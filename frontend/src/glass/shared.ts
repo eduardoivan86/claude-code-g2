@@ -67,6 +67,8 @@ export interface AppSnapshot {
   nativeMirrorStatus: NativeMirrorStatus
   nativeLoading: boolean
   nativeAttention: boolean
+  // 3-tap HUD hide: when true every screen renders a near-blank/dim display.
+  hudHidden: boolean
   // Pending voice follow-ups pinned on the HUD (queued = waiting for Claude,
   // !queued = sent, awaiting SSE confirm).
   nativePending: { text: string; queued: boolean }[]
@@ -113,6 +115,7 @@ export interface AppActions {
   scrollNativeMirror(delta: number): void
   recordNativeFollowUp(): void                        // tap in mirror → voice follow-up
   clearNativeAttention(): void                        // dismiss the "Claude needs you" banner
+  setHudHidden(v: boolean): void                      // 3-tap hide / unhide the HUD
   exitNative(): void                                  // back out to the main glasses UI
   nativeBack(): void                                  // mirror → sessions → projects → main
 

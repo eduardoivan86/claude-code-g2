@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import type { TranscriptEvent } from './store.ts'
-import type { PermissionMode } from '../config.ts'
+import type { PermissionMode, EffortLevel } from '../config.ts'
 
 // Wraps `claude -p --input-format stream-json --output-format stream-json`.
 // We use the CLI (not @anthropic-ai/claude-agent-sdk) because the SDK
@@ -44,6 +44,8 @@ export interface SpawnOptions {
   claudeBinary: string
   model?: string // 'sonnet' | 'opus' | full id; defaults to sonnet
   permissionMode?: PermissionMode
+  effort?: EffortLevel // passed to the CLI as --effort when set
+  settings?: string // passed to the CLI as --settings (e.g. JSON) when set
   resume?: boolean
 }
 
@@ -57,6 +59,8 @@ export class ClaudeCodeProc {
   private claudeBinary: string
   private model: string
   private permissionMode: PermissionMode
+  private effort?: EffortLevel
+  private settings?: string
   private onEvent: ProcEventHandler
   private resume: boolean
   // If the current run already emitted a `result` event, the subsequent
@@ -69,6 +73,8 @@ export class ClaudeCodeProc {
     this.claudeBinary = opts.claudeBinary
     this.model = opts.model ?? 'sonnet'
     this.permissionMode = opts.permissionMode ?? 'bypassPermissions'
+    this.effort = opts.effort
+    this.settings = opts.settings
     this.resume = opts.resume ?? false
     this.onEvent = onEvent
   }
@@ -89,6 +95,8 @@ export class ClaudeCodeProc {
       '--output-format', 'stream-json',
       '--verbose',
       '--model', this.model,
+      ...(this.effort ? ['--effort', this.effort] : []),
+      ...(this.settings ? ['--settings', this.settings] : []),
       '--add-dir', this.cwd,
       ...permissionArgs,
       '--allowedTools', DEFAULT_ALLOWED_TOOLS.join(' '),
@@ -110,7 +118,7 @@ export class ClaudeCodeProc {
     this.rl = readline.createInterface({ input: this.child.stdout })
     this.rl.on('line', (line) => this.handleLine(line))
 
-    console.log(`[claude:${this.tag()}] start model=${this.model} perm=${this.permissionMode} resume=${this.resume} cwd=${this.cwd}`)
+    console.log(`[claude:${this.tag()}] start model=${this.model} effort=${this.effort ?? 'default'} perm=${this.permissionMode} resume=${this.resume} cwd=${this.cwd}`)
 
     this.child.stderr.on('data', (chunk) => {
       // The CLI sometimes prints warnings / update hints on stderr. Log but

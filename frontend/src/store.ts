@@ -70,6 +70,10 @@ export interface AppState {
   // Claude is now waiting on the user. Drives a prominent HUD banner; cleared
   // when the user taps to answer or re-opens the mirror.
   nativeAttention: boolean
+  // 3-tap HUD hide: when true the glasses render a near-blank/dim screen while
+  // the app + SSE stay alive. Cleared by a manual double-tap (GO_BACK) or
+  // auto-unhidden on the next nativeAttention false→true edge.
+  hudHidden: boolean
   // Pending voice follow-ups awaiting delivery to Claude. `queued:true` = got a
   // 409 (session busy), retrying until Claude frees up; `queued:false` = accepted
   // (200), waiting for the mirror SSE to echo the real user turn. Either way the
@@ -173,6 +177,7 @@ const initialState: AppState = {
   nativeMirrorStatus: null,
   nativeLoading: false,
   nativeAttention: false,
+  hudHidden: false,
   nativePending: [],
 
   voiceEnabled: readVoiceEnabled(),
@@ -426,6 +431,14 @@ export const store = {
   // arrives over the mirror SSE; cleared when the user taps to answer.
   setNativeAttention(v: boolean): void {
     set({ nativeAttention: v })
+  },
+  // ── 3-tap HUD hide ─────────────────────────────────────────────────────────
+  // Render a near-blank/dim screen while keeping the app + SSE alive.
+  setHudHidden(v: boolean): void {
+    set({ hudHidden: v })
+  },
+  toggleHudHidden(): void {
+    set({ hudHidden: !state.hudHidden })
   },
   // Append/replace a turn from the mirror SSE. tailSession replays existing
   // turns then streams new ones; turns are keyed by uuid so replays of the

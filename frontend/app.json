@@ -2,7 +2,7 @@
   "package_id": "com.eduardoivan.ccg2native",
   "edition": "202601",
   "name": "Claude Code G2",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Mirror, continue by voice, and start your real Claude Code sessions on G2 glasses.",
   "author": "Eduardo Ivan",
   "min_app_version": "2.0.0",
