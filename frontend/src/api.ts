@@ -15,14 +15,6 @@ export class NotConfiguredError extends Error {
   }
 }
 
-// Thrown when POST /api/native/sessions/:sid/message returns 409 (mid-generation).
-export class SessionBusyError extends Error {
-  constructor() {
-    super('Session is busy (mid-generation)')
-    this.name = 'SessionBusyError'
-  }
-}
-
 function getCreds(): { url: string; token: string } {
   const { backendUrl, token } = store.getState()
   if (!backendUrl || !token) throw new NotConfiguredError()
@@ -199,15 +191,25 @@ export async function newNativeSession(cwd: string, prompt: string): Promise<str
   return body.sessionId
 }
 
-// Append a turn to an existing native session (resume). 202 on accept;
-// throws SessionBusyError on 409. Reply turns arrive via the mirror SSE.
-export async function sendNativeMessage(sid: string, prompt: string): Promise<void> {
+// Append a turn to an existing native session (resume). The backend never
+// rejects on a busy session anymore: it either delivers immediately (200,
+// queued:false) or queues the message for backend-driven delivery once the
+// session frees up (202, queued:true). Either way the reply (and the echoed
+// user turn) arrive via the mirror SSE. Throws only on a real error.
+export async function sendNativeMessage(
+  sid: string,
+  prompt: string,
+): Promise<{ queued: boolean }> {
   const res = await authFetch(`/api/native/sessions/${encodeURIComponent(sid)}/message`, {
     method: 'POST',
     body: JSON.stringify({ prompt }),
   })
-  if (res.status === 409) throw new SessionBusyError()
   if (!res.ok) throw new Error(`sendNativeMessage: ${res.status}`)
+  // 202 → queued for later delivery; 200 → delivered immediately. Read the flag
+  // from the body, falling back to the status code if the JSON is unexpected.
+  const body = (await res.json().catch(() => null)) as { queued?: boolean } | null
+  const queued = body?.queued ?? res.status === 202
+  return { queued }
 }
 
 // ── Active-session handoff ───────────────────────────────────────────────

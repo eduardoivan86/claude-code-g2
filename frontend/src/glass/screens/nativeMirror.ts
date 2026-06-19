@@ -190,10 +190,10 @@ export const nativeMirrorScreen: GlassScreen<AppSnapshot, AppActions> = {
 
   action(action, nav, snapshot, ctx) {
     if (action.type === 'HIGHLIGHT_MOVE') {
-      // Chat-style scroll: swipe UP goes UP into older history (offset grows),
-      // swipe DOWN returns toward the latest turn. Entering a session always
+      // Chat-style scroll: swipe DOWN goes UP into older history (offset grows),
+      // swipe UP returns toward the latest turn. Entering a session always
       // starts pinned to the bottom (openNativeMirror resets offset to 0).
-      const delta = action.direction === 'up' ? 5 : -5
+      const delta = action.direction === 'down' ? 5 : -5
       ctx.scrollNativeMirror(delta)
       return nav
     }

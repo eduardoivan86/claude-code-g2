@@ -15,6 +15,8 @@ import { listProjects, listSessions, readSessionMeta } from '../native/nativeSes
 import { tailSession } from '../native/tailer'
 import { isSessionIdle } from '../native/idleGuard'
 import { emitAttention, onAttention } from '../native/bus'
+import { deliverToSession } from '../native/deliver'
+import { enqueue } from '../native/queue'
 
 // -----------------------------------------------------------------------------
 // "Native sessions" HTTP API.
@@ -221,31 +223,24 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
       res.status(404).json({ error: 'not_found' })
       return
     }
-    if (!isSessionIdle(file)) {
-      res.status(409).json({ error: 'session_busy' })
+    // Robust delivery: if the session is idle, deliver immediately. If it's busy
+    // (mid-turn), DON'T reject — queue the message and let the backend drain it
+    // one-at-a-time as the session frees up. This survives the phone going to the
+    // background because the backend, not the client, owns delivery timing.
+    //
+    // The delivered message lands in the real transcript, so the mirror SSE
+    // echoes the user turn → the client uses that to clear its pending pin.
+    if (isSessionIdle(file)) {
+      deliverToSession(sid, meta.cwd, prompt, deps.getConfig())
+      res.status(200).json({ ok: true, queued: false })
       return
     }
-    const cfg = deps.getConfig()
-    const proc = new ClaudeCodeProc(
-      {
-        sessionId: sid,
-        cwd: meta.cwd,
-        claudeBinary: cfg.claudeBinary,
-        model: cfg.model,
-        permissionMode: cfg.permissionMode,
-        resume: true,
-      },
-      (ev) => {
-        console.log('[native:resume]', sid.slice(0, 8), ev.kind)
-        // A `result` event means the turn completed → Claude is now waiting on
-        // the user. Surface a visual "needs you" alert on the HUD.
-        if (ev.kind === 'result') {
-          emitAttention(sid, { reason: 'turn_complete' })
-        }
-      },
+    enqueue(
+      sid,
+      { cwd: meta.cwd, prompt },
+      { getConfig: deps.getConfig, projectsRoot: root },
     )
-    proc.send(prompt)
-    res.status(202).json({ ok: true })
+    res.status(202).json({ ok: true, queued: true })
   })
 
   // ----- start a brand-new native session ------------------------------------
