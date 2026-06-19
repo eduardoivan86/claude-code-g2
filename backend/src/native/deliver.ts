@@ -1,5 +1,7 @@
+import { basename } from 'node:path'
 import { ClaudeCodeProc } from '../sessions/claudeProc.ts'
 import { emitAttention } from './bus'
+import { notifyTelegram } from './telegram'
 import type { RuntimeConfig } from '../config.ts'
 
 // -----------------------------------------------------------------------------
@@ -39,9 +41,12 @@ export function deliverToSession(
     (ev) => {
       console.log('[native:resume]', sid.slice(0, 8), ev.kind)
       // A `result` event means the turn completed → Claude is now waiting on
-      // the user. Surface a visual "needs you" alert on the HUD.
+      // the user. Surface a visual "needs you" alert on the HUD, AND fire an
+      // out-of-band Telegram ping (works even if the glasses app is CLOSED).
+      // ONLY on `result` (one per turn), never on every streamed event.
       if (ev.kind === 'result') {
         emitAttention(sid, { reason: 'turn_complete' })
+        void notifyTelegram(`🔔 Claude terminó en ${basename(cwd)} — te espera.`)
       }
     },
   )

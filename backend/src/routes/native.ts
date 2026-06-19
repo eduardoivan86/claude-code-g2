@@ -21,6 +21,8 @@ import { runBrain } from '../native/brain'
 import { appendBrainLog, readBrainLog } from '../native/brainLog'
 import { ttsConfigFromEnv } from '../native/ttsConfig.ts'
 import { synthesize } from '../native/tts.ts'
+import { notifyTelegram } from '../native/telegram'
+import { basename } from 'node:path'
 
 // -----------------------------------------------------------------------------
 // "Native sessions" HTTP API.
@@ -364,6 +366,7 @@ export function makeNativeRouter(deps: NativeRouterDeps): Router {
         console.log('[native:new]', sid.slice(0, 8), ev.kind)
         if (ev.kind === 'result') {
           emitAttention(sid, { reason: 'turn_complete' })
+          void notifyTelegram(`🔔 Claude terminó en ${basename(cwd)} — te espera.`)
         }
       },
     )
