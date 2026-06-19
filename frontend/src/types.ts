@@ -27,6 +27,60 @@ export interface ProjectInfo {
   name: string
 }
 
+// ── Native sessions bridge (reads ~/.claude/projects/*.jsonl) ──────────────
+// These mirror backend/src/native/types.ts. Kept separate from the
+// TranscriptEvent stream above — native turns are pre-assembled by the backend.
+
+export interface NativeTurn {
+  uuid: string
+  sessionId: string
+  role: 'user' | 'assistant'
+  text: string
+  thinking?: string
+  toolUses: { name: string; summary: string }[]
+  isToolResult: boolean
+  timestamp: string
+  // Present on an assistant turn carrying an AskUserQuestion tool_use. The
+  // glasses show the option picker and relay the chosen label as a follow-up.
+  askQuestion?: {
+    toolUseId: string
+    questions: {
+      question: string
+      header?: string
+      multiSelect?: boolean
+      options: { label: string; description?: string }[]
+    }[]
+  }
+}
+
+// One persisted brain-conversation exchange half. The backend writes a sidecar
+// JSONL (~/.cc-g2/brain-log/<sid>.jsonl) so ephemeral brain replies survive and
+// can be merged into the mirror timeline. ts is epoch ms (unlike NativeTurn's
+// ISO `timestamp`).
+export interface BrainLogEntry {
+  ts: number
+  role: 'brain-user' | 'brain'
+  text: string
+  relayed?: boolean
+}
+
+export interface NativeSessionSummary {
+  sessionId: string
+  filePath: string
+  cwd: string
+  project: string
+  title: string
+  updatedAt: number
+}
+
+export interface NativeProjectSummary {
+  dirPath: string
+  cwd: string
+  project: string
+  sessionCount: number
+  updatedAt: number
+}
+
 export interface BackendConfig {
   projects: ProjectInfo[]
   defaultProjectName: string
@@ -50,5 +104,8 @@ export type AppMode =
   | 'recording-turn'
   | 'confirming-transcript'  // Phase 3: voice feedback confirmation
   | 'answering'              // Phase 3: AskUserQuestion answer picker
+  | 'native-projects'        // Native bridge: browse ~/.claude/projects
+  | 'native-sessions'        // Native bridge: sessions within a project
+  | 'native-mirror'          // Native bridge: live mirror of one session
 
 export type ConnectionStatus = 'unknown' | 'ok' | 'error'

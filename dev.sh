@@ -138,7 +138,7 @@ wait_for_log() {
 start_backend() {
   say "starting backend on :$BACKEND_PORT..."
   : > "$BACKEND_LOG"
-  (cd "$BACKEND_DIR" && PORT=$BACKEND_PORT bun src/index.ts) > "$BACKEND_LOG" 2>&1 &
+  (cd "$BACKEND_DIR" && PORT=$BACKEND_PORT bun --watch src/index.ts) > "$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   wait_for_log "$BACKEND_LOG" "listening on" "backend" 80
 }

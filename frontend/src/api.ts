@@ -1,5 +1,8 @@
 import type {
   BackendConfig,
+  BrainLogEntry,
+  NativeProjectSummary,
+  NativeSessionSummary,
   Session,
   SessionSummary,
   SseEvent,
@@ -78,11 +81,43 @@ export async function getConfig(): Promise<BackendConfig> {
 
 export type PermissionMode = 'bypassPermissions' | 'acceptEdits' | 'default'
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export interface VoiceSettings {
+  ttsProvider: 'browser' | 'elevenlabs' | 'openai'
+  elevenlabsVoiceId: string
+  openaiVoice: string
+  brainModel: string
+  elevenlabsKeySet: boolean
+  openaiKeySet: boolean
+}
+
+// What the client may POST back. Keys are write-only (never returned by GET):
+// send a non-empty key to set it, or clear*Key:true to remove it. Omit to keep.
+export interface VoiceSettingsUpdate {
+  ttsProvider?: 'browser' | 'elevenlabs' | 'openai'
+  elevenlabsApiKey?: string
+  elevenlabsVoiceId?: string
+  openaiApiKey?: string
+  openaiVoice?: string
+  brainModel?: string
+  clearElevenlabsKey?: boolean
+  clearOpenaiKey?: boolean
+}
+
 export interface Settings {
   permissionMode: PermissionMode
   model: string
+  effort: EffortLevel
+  ultracode: boolean
+  voice: VoiceSettings
   defaultProjectName: string
   projects: { name: string }[]
+}
+
+// The POST body mirrors Settings but `voice` carries the write-only update shape.
+export type SettingsUpdate = Partial<Omit<Settings, 'voice' | 'projects'>> & {
+  voice?: VoiceSettingsUpdate
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -91,7 +126,7 @@ export async function getSettings(): Promise<Settings> {
   return res.json()
 }
 
-export async function saveSettings(update: Partial<Settings>): Promise<Settings> {
+export async function saveSettings(update: SettingsUpdate): Promise<Settings> {
   const res = await authFetch('/api/settings', {
     method: 'POST',
     body: JSON.stringify(update),
@@ -154,6 +189,150 @@ export async function transcribeAudio(pcm: Uint8Array): Promise<string> {
   if (!res.ok) throw new Error(`transcribe: ${res.status}`)
   const body = await res.json() as { text: string }
   return body.text
+}
+
+// ── Text-to-speech (natural cloud voice) ─────────────────────────────────
+// POST the spoken text to the backend. If a cloud provider is configured the
+// response is `audio/mpeg` (mp3) → return the Blob to play. If no cloud
+// provider is configured the backend answers `{ browser: true }` (JSON) →
+// return null so the caller falls back to speechSynthesis. Any error also
+// returns null (graceful fall back to the browser voice).
+export async function ttsSynthesize(text: string): Promise<Blob | null> {
+  try {
+    const res = await authFetch('/api/native/tts', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) return null
+    const ct = (res.headers.get('Content-Type') ?? '').toLowerCase()
+    if (ct.includes('audio/mpeg')) return await res.blob()
+    // JSON `{ browser: true }` (or anything non-audio) → use the browser voice.
+    return null
+  } catch {
+    return null
+  }
+}
+
+// ── Native sessions bridge ───────────────────────────────────────────────
+// Reads the user's own ~/.claude/projects/*.jsonl transcripts via the backend
+// /api/native/* routes. Reuses authFetch (header bearer) for plain HTTP; the
+// mirror stream uses EventSource with ?token= (see nativeMirrorUrl below).
+
+export async function listNativeProjects(): Promise<NativeProjectSummary[]> {
+  const res = await authFetch('/api/native/projects')
+  if (!res.ok) throw new Error(`listNativeProjects: ${res.status}`)
+  return res.json() as Promise<NativeProjectSummary[]>
+}
+
+export async function listNativeSessions(dir: string): Promise<NativeSessionSummary[]> {
+  const res = await authFetch(`/api/native/projects/${encodeURIComponent(dir)}/sessions`)
+  if (!res.ok) throw new Error(`listNativeSessions: ${res.status}`)
+  return res.json() as Promise<NativeSessionSummary[]>
+}
+
+// Start a brand-new native session in `cwd`. Returns the server-chosen sid.
+// The .jsonl appears a moment later, so the mirror stream may 404 briefly —
+// callers should retry opening the mirror.
+export async function newNativeSession(cwd: string, prompt: string): Promise<string> {
+  const res = await authFetch('/api/native/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ cwd, prompt }),
+  })
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`newNativeSession: ${res.status} ${err}`)
+  }
+  const body = await res.json() as { sessionId: string }
+  return body.sessionId
+}
+
+// Append a turn to an existing native session (resume). The backend never
+// rejects on a busy session anymore: it either delivers immediately (200,
+// queued:false) or queues the message for backend-driven delivery once the
+// session frees up (202, queued:true). Either way the reply (and the echoed
+// user turn) arrive via the mirror SSE. Throws only on a real error.
+export async function sendNativeMessage(
+  sid: string,
+  prompt: string,
+): Promise<{ queued: boolean }> {
+  const res = await authFetch(`/api/native/sessions/${encodeURIComponent(sid)}/message`, {
+    method: 'POST',
+    body: JSON.stringify({ prompt }),
+  })
+  if (!res.ok) throw new Error(`sendNativeMessage: ${res.status}`)
+  // 202 → queued for later delivery; 200 → delivered immediately. Read the flag
+  // from the body, falling back to the status code if the JSON is unexpected.
+  const body = (await res.json().catch(() => null)) as { queued?: boolean } | null
+  const queued = body?.queued ?? res.status === 202
+  return { queued }
+}
+
+// ── Conversational "brain" ───────────────────────────────────────────────
+// Route a transcribed voice turn through the fast Groq brain. The backend
+// decides whether to answer the user directly from session context (returns a
+// spoken `reply`, `relayed:false`) or relay a well-formulated dev request to the
+// real Claude Code session via the idle→deliver / busy→queue path
+// (`relayed:true`). Claude's own response still streams in over the mirror SSE.
+export async function brainMessage(
+  sid: string,
+  text: string,
+): Promise<{ reply: string; relayed: boolean }> {
+  const res = await authFetch('/api/native/brain', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: sid, text }),
+  })
+  if (!res.ok) throw new Error(`brainMessage: ${res.status}`)
+  const body = (await res.json()) as { reply?: string; relayed?: boolean }
+  return { reply: body.reply ?? '', relayed: body.relayed ?? false }
+}
+
+// ── Brain conversation sidecar log ───────────────────────────────────────
+// Read the persisted brain exchanges for a session (oldest first). These are
+// merged into the mirror timeline so the brain's replies appear inline with the
+// real Claude turns at the moment they happened. Returns [] on a missing log.
+export async function getBrainLog(sid: string): Promise<BrainLogEntry[]> {
+  const res = await authFetch(`/api/native/brain-log/${encodeURIComponent(sid)}`)
+  if (!res.ok) throw new Error(`getBrainLog: ${res.status}`)
+  return res.json() as Promise<BrainLogEntry[]>
+}
+
+// ── Active-session handoff ───────────────────────────────────────────────
+// The backend persists the "session you're actively working on" (set by the
+// glasses opening a session or the Mac `g2 handoff` command; cleared when the
+// user backs out of the mirror). On init the glasses GET it and auto-resume.
+
+export interface HandoffInfo {
+  sessionId: string | null
+  cwd?: string
+  project?: string
+  title?: string
+}
+
+// Read the pinned active session. Returns `{ sessionId: null }` when none is
+// set or the pinned id no longer resolves to a real transcript.
+export async function getHandoff(): Promise<HandoffInfo> {
+  const res = await authFetch('/api/native/handoff')
+  if (!res.ok) throw new Error(`getHandoff: ${res.status}`)
+  return res.json() as Promise<HandoffInfo>
+}
+
+// Pin (or, with null, clear) the active session server-side. Fire-and-forget
+// at call sites — failures shouldn't block navigation.
+export async function setHandoff(sessionId: string | null): Promise<void> {
+  const res = await authFetch('/api/native/handoff', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
+  })
+  if (!res.ok) throw new Error(`setHandoff: ${res.status}`)
+}
+
+// Build the mirror SSE URL with the bearer token as a query param
+// (EventSource can't set headers). Returns null if not configured.
+export function nativeMirrorUrl(sid: string): string | null {
+  const { backendUrl, token } = store.getState()
+  if (!backendUrl || !token) return null
+  const qs = new URLSearchParams({ token })
+  return `${backendUrl}/api/native/sessions/${encodeURIComponent(sid)}/stream?${qs.toString()}`
 }
 
 // Server-Sent Events — single reconnecting connection per channel.

@@ -18,6 +18,12 @@ Run **Claude Code** hands-free from your **Even Realities G2 AR glasses**. Tap t
                                              Max/Pro subscription
 ```
 
+## 🔱 Fork: Native Sessions Bridge
+
+This fork adds a bridge so the glasses **mirror, continue (by voice), list, and start your _real_ Claude Code sessions** (`~/.claude/projects`) — not the upstream's isolated session store. See **[NATIVE-BRIDGE.md](./NATIVE-BRIDGE.md)** for what it adds, the `/api/native/*` API, Groq transcription setup, and how to run/test on the glasses.
+
+---
+
 ## Why?
 
 Claude Code in the terminal is amazing, but you have to look at your screen. With Claude Code G2, the AI output floats in your field of vision while you're doing other things — walking, whiteboarding, pair-programming, or just thinking with your hands free.

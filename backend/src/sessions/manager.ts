@@ -121,6 +121,8 @@ export class SessionManager {
         claudeBinary: this.cfg.claudeBinary,
         model: opts.model ?? this.cfg.model,
         permissionMode: this.cfg.permissionMode,
+        effort: this.cfg.effort,
+        ...(this.cfg.ultracode ? { settings: JSON.stringify({ ultracode: true }) } : {}),
         resume: opts.resume,
       },
       (ev) => this.handleProcEvent(session.id, ev),

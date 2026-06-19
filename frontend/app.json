@@ -1,12 +1,28 @@
 {
-  "id": "com.samsiavoshian.ccg2",
+  "package_id": "com.eduardoivan.ccg2native",
+  "edition": "202601",
   "name": "Claude Code G2",
-  "version": "0.1.0",
-  "description": "Run Claude Code from your G2 glasses.",
-  "author": "Sam Siavoshian",
-  "entry": "index.html",
+  "version": "0.1.14",
+  "description": "Mirror, continue by voice, and start your real Claude Code sessions on G2 glasses.",
+  "author": "Eduardo Ivan",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.7",
+  "entrypoint": "index.html",
   "permissions": [
-    "audio",
-    "storage"
+    {
+      "name": "g2-microphone",
+      "desc": "Capture your voice from the glasses microphone to dictate prompts to Claude Code."
+    },
+    {
+      "name": "phone-microphone",
+      "desc": "Capture your voice from the phone microphone as a fallback input for prompts."
+    },
+    {
+      "name": "network",
+      "desc": "Connect to your own Claude Code backend running on your Mac (via Tailscale or a tunnel)."
+    }
+  ],
+  "supported_languages": [
+    "en"
   ]
 }

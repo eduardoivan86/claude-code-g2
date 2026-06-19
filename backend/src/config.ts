@@ -10,6 +10,19 @@ export interface ProjectEntry {
 
 export type PermissionMode = 'bypassPermissions' | 'acceptEdits' | 'default'
 export type ModelName = 'sonnet' | 'opus' | 'haiku' | string
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+// Voice / brain settings persisted in config.json. Keys are server-side
+// secrets and are never echoed back over HTTP (the GET /settings route returns
+// a masked block instead). All fields optional so old configs still load.
+export interface VoiceSettings {
+  ttsProvider?: 'browser' | 'elevenlabs' | 'openai'
+  elevenlabsApiKey?: string
+  elevenlabsVoiceId?: string
+  openaiApiKey?: string
+  openaiVoice?: string
+  brainModel?: string
+}
 
 export interface ConfigFile {
   token: string
@@ -19,6 +32,9 @@ export interface ConfigFile {
   permissionMode: PermissionMode
   model: ModelName
   openaiApiKey?: string
+  voice?: VoiceSettings
+  effort?: EffortLevel
+  ultracode?: boolean
 }
 
 export interface RuntimeConfig extends ConfigFile {
@@ -31,6 +47,20 @@ export const VALID_PERMISSION_MODES: ReadonlySet<PermissionMode> = new Set([
   'bypassPermissions',
   'acceptEdits',
   'default',
+])
+
+export const VALID_EFFORTS: ReadonlySet<EffortLevel> = new Set([
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+])
+
+const VALID_TTS_PROVIDERS: ReadonlySet<NonNullable<VoiceSettings['ttsProvider']>> = new Set([
+  'browser',
+  'elevenlabs',
+  'openai',
 ])
 
 const CONFIG_DIR = path.join(os.homedir(), '.cc-g2')
@@ -105,6 +135,21 @@ export function loadConfig(): RuntimeConfig {
     cfg.claudeBinary = 'claude'
     created = true
   }
+  // Newer fields (voice / effort / ultracode) are fully optional — old configs
+  // that pre-date them simply load with them undefined. We only normalize away
+  // obviously-invalid persisted values so the rest of the app can trust them.
+  if (cfg.voice != null && typeof cfg.voice !== 'object') {
+    delete cfg.voice
+    created = true
+  }
+  if (cfg.effort != null && !VALID_EFFORTS.has(cfg.effort)) {
+    delete cfg.effort
+    created = true
+  }
+  if (cfg.ultracode != null && typeof cfg.ultracode !== 'boolean') {
+    cfg.ultracode = Boolean(cfg.ultracode)
+    created = true
+  }
 
   if (created) {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), { mode: 0o600 })
@@ -170,6 +215,12 @@ export interface SettingsUpdate {
   permissionMode?: PermissionMode
   model?: ModelName
   defaultProjectName?: string
+  voice?: Partial<VoiceSettings> & {
+    clearElevenlabsKey?: boolean
+    clearOpenaiKey?: boolean
+  }
+  effort?: EffortLevel
+  ultracode?: boolean
 }
 
 export function saveSettings(cfg: RuntimeConfig, update: SettingsUpdate): RuntimeConfig {
@@ -186,6 +237,55 @@ export function saveSettings(cfg: RuntimeConfig, update: SettingsUpdate): Runtim
   ) {
     next.defaultProjectName = update.defaultProjectName
   }
+  if (update.effort !== undefined) {
+    if (!VALID_EFFORTS.has(update.effort)) {
+      throw new Error(`invalid effort: ${update.effort}`)
+    }
+    next.effort = update.effort
+  }
+  if (typeof update.ultracode === 'boolean') {
+    next.ultracode = update.ultracode
+  }
+  // Voice block: merge the incoming partial onto the existing voice settings.
+  // API keys are special — masked re-saves send back an empty/missing key, so
+  // we must NOT overwrite a stored key unless a NON-EMPTY string arrives. The
+  // explicit clear flags are the only way to wipe a key.
+  if (update.voice && typeof update.voice === 'object') {
+    const v = update.voice
+    const nextVoice: VoiceSettings = { ...(next.voice ?? {}) }
+
+    if (v.ttsProvider !== undefined) {
+      if (!VALID_TTS_PROVIDERS.has(v.ttsProvider)) {
+        throw new Error(`invalid ttsProvider: ${v.ttsProvider}`)
+      }
+      nextVoice.ttsProvider = v.ttsProvider
+    }
+    if (typeof v.elevenlabsVoiceId === 'string') {
+      nextVoice.elevenlabsVoiceId = v.elevenlabsVoiceId
+    }
+    if (typeof v.openaiVoice === 'string') {
+      nextVoice.openaiVoice = v.openaiVoice
+    }
+    if (v.brainModel !== undefined) {
+      if (typeof v.brainModel !== 'string' || v.brainModel.trim().length === 0) {
+        throw new Error('brainModel must be a non-empty string')
+      }
+      nextVoice.brainModel = v.brainModel
+    }
+
+    // Only overwrite keys when a non-empty string is supplied.
+    if (typeof v.elevenlabsApiKey === 'string' && v.elevenlabsApiKey.length > 0) {
+      nextVoice.elevenlabsApiKey = v.elevenlabsApiKey
+    }
+    if (typeof v.openaiApiKey === 'string' && v.openaiApiKey.length > 0) {
+      nextVoice.openaiApiKey = v.openaiApiKey
+    }
+    // Explicit clears win over everything.
+    if (v.clearElevenlabsKey) delete nextVoice.elevenlabsApiKey
+    if (v.clearOpenaiKey) delete nextVoice.openaiApiKey
+
+    next.voice = nextVoice
+  }
   // Re-write only the on-disk fields, preserving the secret token.
   const onDisk: ConfigFile = {
     token: next.token,
@@ -195,6 +295,9 @@ export function saveSettings(cfg: RuntimeConfig, update: SettingsUpdate): Runtim
     permissionMode: next.permissionMode,
     model: next.model,
   }
+  if (next.voice !== undefined) onDisk.voice = next.voice
+  if (next.effort !== undefined) onDisk.effort = next.effort
+  if (next.ultracode !== undefined) onDisk.ultracode = next.ultracode
   fs.writeFileSync(next.configPath, JSON.stringify(onDisk, null, 2), { mode: 0o600 })
   return next
 }

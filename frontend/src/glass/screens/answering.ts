@@ -71,14 +71,15 @@ export const answeringScreen: GlassScreen<AppSnapshot, AppActions> = {
       const selected = items[idx]!
 
       if (selected === '× skip') {
-        // Skip — just go back to main, Claude will continue with default.
-        ctx.cancelRecording()
+        // Skip — dismiss the question. Routes back to the mirror (native) or
+        // main (managed); Claude continues with its default.
+        ctx.cancelAnswer()
         return { ...nav, highlightedIndex: 0 }
       }
 
       if (selected === '🎤 voice answer') {
-        // Start recording a freeform voice answer.
-        ctx.startTurnRecording()
+        // Start recording a freeform voice answer (native- or managed-aware).
+        ctx.voiceAnswer()
         return { ...nav, highlightedIndex: 0 }
       }
 
@@ -89,7 +90,7 @@ export const answeringScreen: GlassScreen<AppSnapshot, AppActions> = {
 
     if (action.type === 'GO_BACK') {
       // Skip the question.
-      ctx.cancelRecording()
+      ctx.cancelAnswer()
       return { ...nav, highlightedIndex: 0 }
     }
 

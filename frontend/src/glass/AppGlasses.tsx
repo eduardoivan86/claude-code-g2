@@ -9,19 +9,115 @@ import type { AppSnapshot, AppActions } from './shared'
 import { isRecordingMode, store, useAppState } from '../store'
 import {
   bootstrap,
+  brainMessage,
   createSession,
   deleteSession as apiDeleteSession,
+  getBrainLog,
+  getHandoff,
   getSession,
+  listNativeProjects,
+  listNativeSessions,
+  nativeMirrorUrl,
+  newNativeSession,
+  sendNativeMessage,
+  setHandoff,
   sendTurn,
   SseClient,
   transcribeAudio,
 } from '../api'
-import type { AppMode, SseEvent } from '../types'
+import type { AppMode, NativeTurn, SseEvent } from '../types'
 import { startCapture, stopCapture } from '../audio'
+import { speak } from '../voice'
+
+// TODO(background-state): persist the native mirror so the "Claude needs you"
+// banner keeps working when the phone app is backgrounded. The Even Hub runs
+// the plugin in a headless WebView that keeps pushing frames to the glasses,
+// but on a foreground/background round-trip in-memory store state can be lost.
+// The intended wiring (NOT added — see below) is, at module init:
+//
+//   setBackgroundState('nativeMirror', () => ({
+//     nativeMirrorSid:     store.getState().nativeMirrorSid,
+//     nativeMirrorCwd:     store.getState().nativeMirrorCwd,
+//     nativeTurns:         store.getState().nativeTurns,
+//     sessionScrollOffset: store.getState().sessionScrollOffset,
+//     nativeAttention:     store.getState().nativeAttention,
+//     mode:                store.getState().mode,
+//   }))
+//   onBackgroundRestore('nativeMirror', (saved) => {
+//     // re-open the mirror (re-fires the EventSource effect on the restored sid)
+//     // then reapply turns / scroll / attention / mode via the store setters,
+//     // with nullish fallbacks.
+//   })
+//
+// BLOCKED: the installed `@evenrealities/even_hub_sdk` (v0.0.9) does NOT export
+// setBackgroundState / onBackgroundRestore, and even-toolkit (v1.5.0) does not
+// re-export them either. Per the implementation brief we do NOT invent an
+// import. The foreground notification path (attention bus → SSE → banner) works
+// fully regardless. Wire this up once a background-state API is available in the
+// fork's SDK (or use the everything-evenhub `background-state` skill).
 
 function fallbackModeAfterRecording(): AppMode {
   return 'main'
 }
+
+// Detect an AskUserQuestion on a native mirror turn and drive the answering
+// screen. Phase 1: show questions[0] only; the chosen option label is relayed
+// to the mirrored session as a normal follow-up (lossy by design — not a true
+// tool_result, same as the managed path).
+//
+// Two paths:
+//  • assistant turn WITH askQuestion → show the picker (deduped per toolUseId).
+//  • any NEWER turn (different uuid, ≥ the question's timestamp) while a native
+//    question is showing → clear it (it was likely answered elsewhere / the
+//    conversation moved on).
+function handleNativeAskQuestion(turn: NativeTurn, sid: string): void {
+  const st = store.getState()
+  const aq = turn.askQuestion
+
+  if (aq && turn.role === 'assistant' && aq.questions.length > 0) {
+    // Dedup: already showing this exact question for this session.
+    if (
+      st.nativePendingQuestionSid === sid &&
+      st.pendingQuestion?.toolUseId === aq.toolUseId
+    ) {
+      return
+    }
+    const q = aq.questions[0]!
+    const text = q.multiSelect
+      ? `${q.question} (elegí una; multi por voz)`
+      : q.question
+    store.setNativePendingQuestionSid(sid)
+    store.setPendingQuestion({
+      toolUseId: aq.toolUseId,
+      text,
+      options: q.options.map((o) => o.label),
+    })
+    // Remember which turn raised the question so a strictly-newer turn clears it.
+    pendingQuestionTurnRef.uuid = turn.uuid
+    pendingQuestionTurnRef.ts = turn.timestamp
+    store.enterMode('answering')
+    return
+  }
+
+  // Clear-stale: a different, not-older turn arrived while a native question is
+  // still up → the question was likely answered elsewhere. Drop it and return to
+  // the mirror so the HUD reflects the live conversation.
+  if (
+    st.nativePendingQuestionSid === sid &&
+    st.pendingQuestion &&
+    turn.uuid !== pendingQuestionTurnRef.uuid &&
+    turn.timestamp >= pendingQuestionTurnRef.ts
+  ) {
+    store.setPendingQuestion(null)
+    store.setNativePendingQuestionSid(null)
+    if (store.getState().mode === 'answering') store.enterMode('native-mirror')
+  }
+}
+
+// Tracks the turn that raised the currently-shown native question, so a strictly
+// newer turn over the same mirror SSE can clear a stale picker. Module-level
+// (the handler is module-level too) — only one native question shows at a time.
+const pendingQuestionTurnRef = { uuid: '', ts: '' }
 
 const MODE_PATHS: Record<AppMode, string> = {
   unconfigured: '/g/main',
@@ -32,6 +128,9 @@ const MODE_PATHS: Record<AppMode, string> = {
   'recording-turn': '/g/recording-turn',
   'confirming-transcript': '/g/confirming',
   answering: '/g/answering',
+  'native-projects': '/g/native-projects',
+  'native-sessions': '/g/native-sessions',
+  'native-mirror': '/g/native-mirror',
 }
 
 const PATH_TO_SCREEN: Record<string, string> = {
@@ -42,6 +141,9 @@ const PATH_TO_SCREEN: Record<string, string> = {
   '/g/recording-turn': 'recording-turn',
   '/g/confirming': 'confirming-transcript',
   '/g/answering': 'answering',
+  '/g/native-projects': 'native-projects',
+  '/g/native-sessions': 'native-sessions',
+  '/g/native-mirror': 'native-mirror',
 }
 
 function pathToScreen(pathname: string): string {
@@ -114,13 +216,28 @@ export function AppGlasses() {
           (tevt.kind === 'tool_use' && tevt.name === 'AskUserQuestion')
         ) {
           if (tevt.kind === 'tool_use') {
-            const inp = tevt.input as Record<string, unknown> | undefined
-            const questionText = typeof inp?.question === 'string' ? inp.question : String(inp?.question ?? 'Claude has a question')
-            const rawOpts = inp?.options
-            const options = Array.isArray(rawOpts) ? rawOpts.map(String) : []
+            // Real AskUserQuestion shape: { questions: [{ question, options:
+            // [{ label, description? }] }] }. Phase 1 shows questions[0]. The
+            // old flat { question, options:[string] } fields are kept as a
+            // fallback for any legacy / managed payloads still using them.
+            const inp = tevt.input as Record<string, any> | undefined
+            const q0 = Array.isArray(inp?.questions) ? inp!.questions[0] : undefined
+            const questionText =
+              (typeof q0?.question === 'string' ? q0.question : undefined) ??
+              (typeof inp?.question === 'string' ? inp.question : undefined) ??
+              'Claude has a question'
+            const rawOpts = Array.isArray(q0?.options) ? q0.options : inp?.options
+            const options = Array.isArray(rawOpts)
+              ? rawOpts.map((o: any) =>
+                  o && typeof o === 'object' && typeof o.label === 'string' ? o.label : String(o),
+                )
+              : []
+            // Managed question → no native sid.
+            store.setNativePendingQuestionSid(null)
             store.setPendingQuestion({ toolUseId: tevt.toolUseId, text: questionText, options })
             store.enterMode('answering')
           } else if (tevt.kind === 'question') {
+            store.setNativePendingQuestionSid(null)
             store.setPendingQuestion({ toolUseId: tevt.toolUseId, text: tevt.questionText, options: tevt.options })
             store.enterMode('answering')
           }
@@ -135,6 +252,171 @@ export function AppGlasses() {
     if (!state.backendUrl || !state.token) return
     void bootstrap()
   }, [state.backendUrl, state.token])
+
+  // Auto-resume the pinned active session ONCE per mount, after the connection
+  // is configured. The server is the source of truth (GET /api/native/handoff),
+  // so we don't depend on in-memory/localStorage state surviving — a fresh
+  // headless background WebView load runs this same path and reconnects the
+  // mirror SSE, which lets the existing "Claude te espera" attention banner fire
+  // with the phone pocketed. In the foreground it's the ▶ Continuar resume.
+  //
+  // Gated by a ref so it fires a single time per mount (not on every state
+  // change) and never fights manual navigation: if no handoff is set, or the
+  // user has already navigated away from `main`, we leave them where they are.
+  const autoResumedRef = useRef(false)
+  useEffect(() => {
+    if (!state.backendUrl || !state.token) return
+    if (autoResumedRef.current) return
+    autoResumedRef.current = true
+    void (async () => {
+      try {
+        const h = await getHandoff()
+        if (!h?.sessionId || !h.cwd) return
+        // Only auto-open if the user hasn't already navigated somewhere else
+        // since mount (avoid yanking them out of a screen they chose).
+        const mode = store.getState().mode
+        if (mode !== 'main' && mode !== 'unconfigured') return
+        store.openNativeMirror(h.sessionId, h.cwd)
+        store.enterMode('native-mirror')
+      } catch (err) {
+        console.warn('[glass] auto-resume handoff failed:', err)
+      }
+    })()
+  }, [state.backendUrl, state.token])
+
+  // Native mirror SSE — one EventSource per mirrored session id. The .jsonl for
+  // a freshly-created native session appears a moment after POST /sessions, so
+  // the stream may 404 briefly; we retry the connection a few times before
+  // giving up. The browser also auto-reconnects via the server `retry:` hint.
+  useEffect(() => {
+    const sid = state.nativeMirrorSid
+    if (!sid || !state.backendUrl || !state.token) return
+    const url = nativeMirrorUrl(sid)
+    if (!url) return
+
+    let es: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    let gotData = false
+    let cancelled = false
+    const MAX_ATTEMPTS = 12 // ~ retries while the .jsonl is being created
+
+    const open = () => {
+      if (cancelled) return
+      attempts++
+      const next = new EventSource(url)
+      es = next
+      next.onmessage = (msg) => {
+        gotData = true
+        try {
+          const parsed = JSON.parse(msg.data) as NativeTurn | { type: 'attention'; reason?: string }
+          // Attention frames (tagged `{ type: 'attention' }`) ride the same SSE
+          // channel as NativeTurn frames. They fire when Claude finishes a turn
+          // and is now waiting on the user → raise the visual HUD banner.
+          if ((parsed as { type?: string }).type === 'attention') {
+            store.setNativeAttention(true)
+          } else {
+            const turn = parsed as NativeTurn
+            store.pushNativeTurn(turn)
+            // The real user turn landed over SSE → drop its pending pin (it now
+            // shows as a normal turn in the transcript). Match on trimmed text.
+            if (turn.role === 'user' && !turn.isToolResult && turn.text && turn.text.trim()) {
+              store.removeNativePending(turn.text)
+            }
+            handleNativeAskQuestion(turn, sid)
+          }
+        } catch (err) {
+          console.warn('[native:mirror] parse error', err)
+        }
+      }
+      next.onerror = () => {
+        if (cancelled) return
+        // If we've never received any data, the session file likely isn't on
+        // disk yet (404 → connection closed). Retry on a short delay.
+        if (!gotData && attempts < MAX_ATTEMPTS) {
+          next.close()
+          if (es === next) es = null
+          retryTimer = setTimeout(open, 800)
+        }
+        // Otherwise leave the EventSource to auto-reconnect via `retry:`.
+      }
+    }
+    open()
+
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+      es?.close()
+    }
+  }, [state.nativeMirrorSid, state.backendUrl, state.token])
+
+  // Load the persisted brain conversation log when a mirror opens, so prior
+  // brain exchanges merge into the timeline (and survive a reload / background
+  // restart). openNativeMirror already reset nativeBrainLog to []; this fills it
+  // from the backend sidecar. Guarded so a stale response for a session the user
+  // already left can't clobber the current one.
+  useEffect(() => {
+    const sid = state.nativeMirrorSid
+    if (!sid || !state.backendUrl || !state.token) return
+    let cancelled = false
+    void getBrainLog(sid)
+      .then((entries) => {
+        if (cancelled) return
+        if (store.getState().nativeMirrorSid !== sid) return
+        store.setNativeBrainLog(entries)
+      })
+      .catch((err) => console.warn('[glass] getBrainLog failed:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [state.nativeMirrorSid, state.backendUrl, state.token])
+
+  // Speak the attention banner when Claude finishes and is now waiting on the
+  // user — but only if voice is enabled. The HUD banner stays as-is regardless.
+  // Fires on the false→true transition of nativeAttention.
+  // NOTE: this speak has NO user gesture, so on iOS WKWebView it may be blocked
+  // until the user has interacted with the page. That's acceptable — the HUD
+  // banner is the guaranteed channel (see voice.ts).
+  const prevAttentionRef = useRef(false)
+  useEffect(() => {
+    const was = prevAttentionRef.current
+    prevAttentionRef.current = state.nativeAttention
+    if (state.nativeAttention && !was) {
+      // A new notification auto-unhides the HUD (if it was 3-tap hidden) so the
+      // user never misses Claude waiting on them.
+      store.setHudHidden(false)
+      if (state.voiceEnabled) {
+        speak('Claude terminó, te espera.')
+      }
+    }
+  }, [state.nativeAttention, state.voiceEnabled])
+
+  // Clear a stale brain reply on a timer so the 🧠 pin doesn't linger forever
+  // if the user never records again. `recordNativeFollowUp` clears it eagerly on
+  // the next turn; this is the fallback for inaction.
+  useEffect(() => {
+    if (!state.nativeBrainReply || state.nativeBrainReply === '…') return
+    const t = setTimeout(() => store.setNativeBrainReply(null), 10_000)
+    return () => clearTimeout(t)
+  }, [state.nativeBrainReply])
+
+  // Re-render ticker for native list/mirror screens (relative times + transient
+  // status spinners). Mirrors the recording/transcribing ticker above.
+  useEffect(() => {
+    const isNative =
+      state.mode === 'native-projects' ||
+      state.mode === 'native-sessions' ||
+      state.mode === 'native-mirror'
+    if (!isNative) return
+    const iv = setInterval(() => setTick((t) => (t + 1) & 0xff), 500)
+    return () => clearInterval(iv)
+  }, [state.mode])
+
+  // NOTE: the client-side retry driver for queued follow-ups was removed — the
+  // backend now owns delivery timing (POST /message queues when busy and drains
+  // one-at-a-time as the session frees up). The HUD just reflects state: a
+  // queued (202) entry stays `queued:true` until the mirror SSE echoes the real
+  // user turn, which drops the pin.
 
   const snapshot: AppSnapshot = {
     mode: state.mode,
@@ -154,8 +436,23 @@ export function AppGlasses() {
     lastActivityAt: state.lastActivityAt,
     confirmTranscriptFlow: state.confirmTranscriptFlow,
     pendingQuestion: state.pendingQuestion,
+    nativePendingQuestionSid: state.nativePendingQuestionSid,
     scrollingTranscript: state.scrollingTranscript,
     sidebarVisible: state.sidebarVisible,
+    nativeProjects: state.nativeProjects,
+    nativeSessions: state.nativeSessions,
+    nativeSelectedProject: state.nativeSelectedProject,
+    nativeMirrorSid: state.nativeMirrorSid,
+    nativeTurns: state.nativeTurns,
+    nativeMirrorStatus: state.nativeMirrorStatus,
+    nativeLoading: state.nativeLoading,
+    nativeAttention: state.nativeAttention,
+    hudHidden: state.hudHidden,
+    nativePending: state.nativePending,
+    voiceEnabled: state.voiceEnabled,
+    scrollInverted: state.scrollInverted,
+    nativeBrainReply: state.nativeBrainReply,
+    nativeBrainLog: state.nativeBrainLog,
   }
   const snapshotRef = useRef(snapshot)
   snapshotRef.current = snapshot
@@ -234,6 +531,15 @@ export function AppGlasses() {
     }
   }
 
+  // When a recording is for the native bridge (new session or follow-up), this
+  // ref records the target so the shared stop/cancel handlers route correctly
+  // instead of hitting the managed-session API.
+  const nativePendingFlow = useRef<
+    | { kind: 'new'; cwd: string }
+    | { kind: 'turn'; sid: string }
+    | null
+  >(null)
+
   const actions = useRef<AppActions>({
     startNewRecording() {
       void beginRecording('recording-new')
@@ -245,6 +551,14 @@ export function AppGlasses() {
       void stopCapture().catch(() => {})
       store.setPendingTranscript(null)
       store.setConfirmTranscriptFlow(null)
+      // If this recording was for the native bridge, return to the right
+      // native screen rather than the main glasses UI.
+      const flow = nativePendingFlow.current
+      nativePendingFlow.current = null
+      if (flow) {
+        store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+        return
+      }
       store.enterMode(fallbackModeAfterRecording())
     },
     async stopNewRecordingAndTranscribe() {
@@ -262,6 +576,11 @@ export function AppGlasses() {
       }
     },
     async stopTurnRecordingAndSend() {
+      // Native bridge recordings are routed here too (they reuse recording-turn).
+      if (nativePendingFlow.current) {
+        await finishNativeRecording()
+        return
+      }
       const sid = store.getState().activeSessionId
       if (!sid) { store.enterMode('main'); return }
       try {
@@ -349,6 +668,28 @@ export function AppGlasses() {
     },
 
     async answerQuestion(answer: string) {
+      // Native question: relay the picked option label straight to the mirrored
+      // session via the direct native message endpoint (NOT the brain — it's a
+      // literal pick). Claude's response streams back over the mirror SSE.
+      const nativeSid = store.getState().nativePendingQuestionSid
+      if (nativeSid) {
+        store.setPendingQuestion(null)
+        store.setNativePendingQuestionSid(null)
+        // Pin the pick on the HUD until the SSE echoes the real user turn.
+        store.addNativePending(answer)
+        store.enterMode('native-mirror')
+        try {
+          await sendNativeMessage(nativeSid, answer)
+          store.markNativePendingSent(answer)
+        } catch (err) {
+          console.error('[glass] answerQuestion (native) failed:', err)
+          store.removeNativePending(answer)
+          store.setError('Answer failed')
+        }
+        return
+      }
+
+      // Managed question: relay via the managed turn endpoint.
       const sid = store.getState().activeSessionId
       store.setPendingQuestion(null)
       store.enterMode('main')
@@ -358,14 +699,278 @@ export function AppGlasses() {
         store.setError('Answer failed')
       }
     },
+
+    cancelAnswer() {
+      const nativeSid = store.getState().nativePendingQuestionSid
+      store.setPendingQuestion(null)
+      store.setNativePendingQuestionSid(null)
+      // Native question → back to the mirror (Claude proceeds with its default).
+      // Managed → back to main, matching the prior cancelRecording() behavior.
+      store.enterMode(nativeSid ? 'native-mirror' : 'main')
+    },
+
+    voiceAnswer() {
+      const nativeSid = store.getState().nativePendingQuestionSid
+      if (nativeSid) {
+        // Native: clear the picker and record a native follow-up (the brain
+        // path), which lets multiSelect / freeform answers go through by voice.
+        store.setPendingQuestion(null)
+        store.setNativePendingQuestionSid(null)
+        store.enterMode('native-mirror')
+        void beginNativeFollowUp()
+        return
+      }
+      // Managed: reuse the existing managed turn recording.
+      actions.current.startTurnRecording()
+    },
+
+    // ── Native sessions bridge ────────────────────────────────────────────
+    openNativeProjects() {
+      store.enterMode('native-projects')
+      store.setNativeLoading(true)
+      void listNativeProjects()
+        .then((projects) => store.setNativeProjects(projects))
+        .catch((err) => {
+          console.error('[glass] listNativeProjects failed:', err)
+          store.setNativeLoading(false)
+          store.setError('Load projects failed')
+        })
+    },
+    pickNativeProject(dirPath: string, project: string) {
+      store.enterMode('native-sessions')
+      store.setNativeLoading(true)
+      void listNativeSessions(dirPath)
+        .then((sessions) => store.setNativeSessions(dirPath, project, sessions))
+        .catch((err) => {
+          console.error('[glass] listNativeSessions failed:', err)
+          store.setNativeLoading(false)
+          store.setError('Load sessions failed')
+        })
+    },
+    openNativeSession(sid: string, cwd: string) {
+      store.openNativeMirror(sid, cwd)
+      store.enterMode('native-mirror')
+      // Pin this as the active session server-side so a relaunch (foreground
+      // ▶ Continuar) or the headless background WebView resumes it. Fire-and-
+      // forget — a failed pin shouldn't block opening the mirror.
+      void setHandoff(sid).catch((err) =>
+        console.warn('[glass] setHandoff (open) failed:', err),
+      )
+    },
+    startNativeNewSession() {
+      void beginNativeNewSession()
+    },
+    scrollNativeMirror(delta: number) {
+      const cur = store.getState().sessionScrollOffset
+      store.setSessionScrollOffset(cur + delta)
+    },
+    recordNativeFollowUp() {
+      void beginNativeFollowUp()
+    },
+    clearNativeAttention() {
+      store.setNativeAttention(false)
+    },
+    exitNative() {
+      store.clearNativeMirror()
+      store.enterMode('main')
+    },
+    nativeBack() {
+      const mode = store.getState().mode
+      if (mode === 'native-mirror') {
+        // Leaving the active session → clear the server-side pin so the app
+        // won't auto-reopen it next launch. Gated on mode === 'native-mirror'
+        // so the other (generic) back levels never touch the handoff.
+        void setHandoff(null).catch((err) =>
+          console.warn('[glass] setHandoff (clear) failed:', err),
+        )
+        store.clearNativeMirror()
+        store.enterMode('native-sessions')
+      } else if (mode === 'native-sessions') {
+        store.enterMode('native-projects')
+      } else {
+        store.enterMode('main')
+      }
+    },
+
+    // ── Pending voice follow-ups (busy-session queue) ─────────────────────
+    addNativePending(text: string) {
+      store.addNativePending(text)
+    },
+    markNativePendingSent(text: string) {
+      store.markNativePendingSent(text)
+    },
+    removeNativePending(text: string) {
+      store.removeNativePending(text)
+    },
+    clearNativePending() {
+      store.clearNativePending()
+    },
+
+    // ── Brain voice / reply ───────────────────────────────────────────────
+    setVoiceEnabled(v: boolean) {
+      store.setVoiceEnabled(v)
+    },
+    setScrollInverted(v: boolean) {
+      store.setScrollInverted(v)
+    },
+    setNativeBrainReply(v: string | null) {
+      store.setNativeBrainReply(v)
+    },
+    setHudHidden(v: boolean) {
+      store.setHudHidden(v)
+    },
   })
+
+  // Native voice flows reuse the existing recording UI (recording-turn mode +
+  // recordingScreen). nativePendingFlow marks the recording as native so the
+  // shared stop handler (stopTurnRecordingAndSend) routes to the native API.
+
+  // [+ new session]: voice → transcribe → POST /api/native/sessions {cwd, prompt}
+  // → open the mirror on the returned sid. cwd is the representative project
+  // cwd from the sessions list we're currently viewing.
+  async function beginNativeNewSession() {
+    const sessions = store.getState().nativeSessions
+    const cwd = sessions[0]?.cwd
+    if (!cwd) {
+      store.setError('No cwd for project')
+      return
+    }
+    nativePendingFlow.current = { kind: 'new', cwd }
+    await beginRecording('recording-turn')
+  }
+
+  // Mirror tap: voice → transcribe → brain. Clear any previous brain reply so a
+  // stale 🧠 pin doesn't linger while the user speaks the next turn.
+  async function beginNativeFollowUp() {
+    const sid = store.getState().nativeMirrorSid
+    if (!sid) return
+    store.setNativeBrainReply(null)
+    nativePendingFlow.current = { kind: 'turn', sid }
+    await beginRecording('recording-turn')
+  }
+
+  // Stop the native recording, transcribe, then dispatch to the native API.
+  // Called from the shared recording stop handler when nativePendingFlow is set.
+  async function finishNativeRecording() {
+    const flow = nativePendingFlow.current
+    nativePendingFlow.current = null
+    if (!flow) return false
+    try {
+      const text = await finishRecordingToText()
+      if (text == null) {
+        // finishRecordingToText already set an error toast.
+        store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+        return true
+      }
+      if (flow.kind === 'new') {
+        store.setNativeMirrorStatus('sending')
+        store.enterMode('native-mirror')
+        const sid = await newNativeSession(flow.cwd, text)
+        store.openNativeMirror(sid, flow.cwd)
+        // Pin the freshly-started session as the active handoff too.
+        void setHandoff(sid).catch((err) =>
+          console.warn('[glass] setHandoff (new) failed:', err),
+        )
+        // Pin the prompt on the HUD as sent (new sessions aren't busy, so it's
+        // already accepted) — it clears when the SSE echoes the real turn.
+        // openNativeMirror just reset nativePending, so add it after.
+        store.addNativePending(text)
+        store.markNativePendingSent(text)
+        // The mirror effect opens the stream (with retry while the .jsonl
+        // is created). Show "connecting" until the first turn arrives.
+        store.setNativeMirrorStatus('connecting')
+        // Clear the connecting hint shortly; turns will replace it.
+        setTimeout(() => {
+          if (store.getState().nativeMirrorSid === sid) {
+            store.setNativeMirrorStatus(null)
+          }
+        }, 4000)
+      } else {
+        // Turn path: route the transcribed voice through the conversational
+        // brain. The brain either answers the user directly (from session
+        // context) or relays a well-formulated dev request to Claude internally
+        // (idle→deliver / busy→queue). We therefore do NOT call sendNativeMessage
+        // here and do NOT use the pending pin — Claude's response (when relayed)
+        // still streams in via the existing mirror SSE.
+        store.enterMode('native-mirror')
+        // Thinking placeholder so the HUD shows `🧠 …` immediately.
+        store.setNativeBrainReply('…')
+        // Timestamp the exchange now (client-side) for the optimistic merge; the
+        // server logs its own ts, but inline placement only needs to be roughly
+        // chronological. +1ms on the reply keeps a stable user→brain order.
+        const ts = Date.now()
+        try {
+          const { reply, relayed } = await brainMessage(flow.sid, text)
+          store.setNativeBrainReply(reply)
+          // Optimistically merge the exchange into the timeline so it shows
+          // inline immediately; it's also persisted server-side and reloaded on
+          // the next mirror open. appendNativeBrainLog dedupes exact repeats.
+          store.appendNativeBrainLog([
+            { ts, role: 'brain-user', text },
+            { ts: ts + 1, role: 'brain', text: reply, relayed },
+          ])
+          if (store.getState().voiceEnabled) speak(reply)
+        } catch (err) {
+          console.error('[glass] brain message failed:', err)
+          store.setNativeBrainReply(null)
+          store.setError('Brain failed')
+        }
+      }
+    } catch (err) {
+      console.error('[glass] native recording flow failed:', err)
+      store.setError('Native send failed')
+      store.setNativeMirrorStatus(null)
+      store.enterMode(flow.kind === 'new' ? 'native-sessions' : 'native-mirror')
+    }
+    return true
+  }
+
+  // 3-tap HUD hide tap counter. Every GlassAction passes through this single
+  // choke point before reaching the per-screen handler, so we can count quick
+  // SELECT_HIGHLIGHTED taps here without touching any screen.
+  const tapHide = useRef<{ count: number; firstTs: number }>({ count: 0, firstTs: 0 })
+  const TAP_HIDE_WINDOW_MS = 900
+  const TAP_HIDE_COUNT = 3
 
   const handleGlassAction = useCallback(
     (
       action: Parameters<typeof onGlassAction>[0],
       nav: Parameters<typeof onGlassAction>[1],
       snap: AppSnapshot,
-    ) => onGlassAction(action, nav, snap, actions.current),
+    ) => {
+      // ── Manual restore: while hidden, a double-tap (GO_BACK) unhides and is
+      // swallowed so it doesn't also navigate back. Checked before normal
+      // handling so a hidden HUD intercepts the gesture.
+      if (store.getState().hudHidden && action.type === 'GO_BACK') {
+        store.setHudHidden(false)
+        return nav
+      }
+
+      // ── 3-tap hide: count quick consecutive taps (SELECT_HIGHLIGHTED).
+      if (action.type === 'SELECT_HIGHLIGHTED') {
+        const now = Date.now()
+        const t = tapHide.current
+        if (now - t.firstTs <= TAP_HIDE_WINDOW_MS) {
+          t.count += 1
+        } else {
+          t.count = 1
+          t.firstTs = now
+        }
+        if (t.count >= TAP_HIDE_COUNT) {
+          store.setHudHidden(true)
+          t.count = 0
+          t.firstTs = 0
+          // Swallow the tap burst so it doesn't also trigger record/select.
+          return nav
+        }
+      } else {
+        // Any non-SELECT_HIGHLIGHTED action breaks the tap streak.
+        tapHide.current.count = 0
+        tapHide.current.firstTs = 0
+      }
+
+      return onGlassAction(action, nav, snap, actions.current)
+    },
     [],
   )
 

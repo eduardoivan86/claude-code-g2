@@ -6,8 +6,12 @@ import { buildSidebarItems } from '../splitView'
 import type { TranscriptEvent } from '../../types'
 
 // Full width on 576px display. LVGL proportional font at 22px with 12px
-// padding each side = 552px usable. Average char ~12-13px = ~44 chars.
-const FULL_COLS = 44
+// padding each side = 552px usable. 552px / ~10.6px avg char ≈ 52 chars; the
+// toolkit's own paginate-text uses 46 as its "fits G2 display" default, so 52
+// (raised from a conservative 44) reclaims reading width while staying within
+// the ~50-56 col range the G2 LVGL font typically fits. Kept in sync with
+// nativeMirror.FULL_COLS. The exact max should be confirmed on-device.
+const FULL_COLS = 52
 
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text
@@ -146,6 +150,10 @@ function renderSidebar(snapshot: AppSnapshot, nav: { highlightedIndex: number })
     const item = items[i]!
     if (item.kind === 'new') {
       lines.push(line(i === highlighted ? '[+ new session]' : ' + new session'))
+      continue
+    }
+    if (item.kind === 'native') {
+      lines.push(line(i === highlighted ? '[⌂ native sessions]' : ' ⌂ native sessions'))
       continue
     }
     const dot = item.isActive ? '●' : (item.busy ? '◐' : '○')
@@ -315,6 +323,8 @@ export const mainScreen: GlassScreen<AppSnapshot, AppActions> = {
         if (!item) return nav
         if (item.kind === 'new') {
           ctx.startNewRecording()
+        } else if (item.kind === 'native') {
+          ctx.openNativeProjects()
         } else if (item.id) {
           ctx.openSessionById(item.id)
         }
